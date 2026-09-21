@@ -1,0 +1,8 @@
+# Local STT (Apple Silicon / MLX) + translation stack
+mlx-qwen3-asr[aligner]
+ollama
+srt
+torch
+transformers
+sentencepiece
+protobuf

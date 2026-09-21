@@ -1,0 +1,64 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
+# Media inputs (keep local only)
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.aac
+
+# Pipeline outputs
+result/
+*.srt
+*.vtt
+*.tsv
+
+# Model / Hugging Face / MLX caches
+.cache/
+huggingface/
+.huggingface/
+models/
+*.mlx
+*.safetensors
+*.bin
+*.gguf
+*.pt
+*.pth
+*.ckpt
+
+# Secrets / local config
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
