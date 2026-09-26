@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# One-shot pipeline: video -> SRT (Qwen3-ASR) -> Korean SRT (NLLB)
+# One-shot pipeline: video -> SRT (Qwen3-ASR) -> Korean SRT (NLLB / Google / Ollama)
 # Usage:
 #   ./run.sh video.mp4
-#   ./run.sh                  # prompts for filename
-#   ./run.sh video.mp4 --setup  # also (re)install packages
+#   ./run.sh                          # prompts for filename
+#   ./run.sh video.mp4 --setup        # also (re)install packages
+#   ./run.sh video.mp4 --engine google
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,36 +12,84 @@ cd "$ROOT"
 
 ASR_MODEL="${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}"
 OUTPUT_DIR="${OUTPUT_DIR:-./result}"
+ENGINE="${TRANSLATE_ENGINE:-}"
 DO_SETUP=0
 VIDEO=""
 
-for arg in "$@"; do
-  case "$arg" in
+usage() {
+  echo "Usage: ./run.sh [video_file] [--engine nllb|google|ollama] [--setup]"
+  echo "  video_file      동영상 경로 (생략 시 입력 요청)"
+  echo "  --engine, -e    번역 엔진 (생략 시 선택 메뉴 표시)"
+  echo "                    nllb   : 로컬 NLLB 모델 (오프라인)"
+  echo "                    google : 구글 번역 (GOOGLE_API_KEY 있으면 공식 API, 없으면 무료 웹)"
+  echo "                    ollama : 로컬 Ollama qwen3"
+  echo "  --setup, -s     venv 생성 및 requirements 설치"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --setup|-s) DO_SETUP=1 ;;
+    --engine|-e)
+      if [[ $# -lt 2 ]]; then
+        echo "--engine 뒤에 엔진 이름이 필요합니다." >&2
+        exit 1
+      fi
+      ENGINE="$2"
+      shift
+      ;;
+    --engine=*) ENGINE="${1#*=}" ;;
     -h|--help)
-      echo "Usage: ./run.sh [video_file] [--setup]"
-      echo "  video_file  동영상 경로 (생략 시 입력 요청)"
-      echo "  --setup     venv 생성 및 requirements 설치"
+      usage
       exit 0
       ;;
     -*)
-      echo "알 수 없는 옵션: $arg" >&2
+      echo "알 수 없는 옵션: $1" >&2
+      usage >&2
       exit 1
       ;;
     *)
       if [[ -z "$VIDEO" ]]; then
-        VIDEO="$arg"
+        VIDEO="$1"
       else
         echo "동영상은 하나만 지정할 수 있습니다." >&2
         exit 1
       fi
       ;;
   esac
+  shift
 done
 
 if [[ -z "$VIDEO" ]]; then
   read -r -p "동영상 파일명(또는 경로)을 입력하세요: " VIDEO
 fi
+
+if [[ -z "$ENGINE" ]]; then
+  echo "========================================"
+  echo " 번역 엔진을 선택하세요."
+  echo " [1] 로컬 NLLB (오프라인, 기본값)"
+  echo " [2] 구글 번역"
+  echo " [3] 로컬 Ollama (qwen3)"
+  echo "========================================"
+  read -r -p "👉 선택 (Enter = 1): " ENGINE_CHOICE
+  case "${ENGINE_CHOICE:-1}" in
+    1) ENGINE="nllb" ;;
+    2) ENGINE="google" ;;
+    3) ENGINE="ollama" ;;
+    *)
+      echo "잘못된 선택입니다: $ENGINE_CHOICE" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+ENGINE="$(echo "$ENGINE" | tr '[:upper:]' '[:lower:]')"
+case "$ENGINE" in
+  nllb|google|ollama) ;;
+  *)
+    echo "지원하지 않는 번역 엔진: $ENGINE (nllb | google | ollama)" >&2
+    exit 1
+    ;;
+esac
 
 VIDEO="${VIDEO/#\~/$HOME}"
 if [[ ! -f "$VIDEO" ]]; then
@@ -62,6 +111,9 @@ if [[ "$DO_SETUP" -eq 1 ]] || ! python -c "import mlx_qwen3_asr" >/dev/null 2>&1
   echo "패키지 설치 중..."
   python -m pip install --upgrade pip
   python -m pip install -r "$ROOT/requirements.txt"
+elif [[ "$ENGINE" == "google" ]] && ! python -c "import deep_translator, requests" >/dev/null 2>&1; then
+  echo "구글 번역 패키지 설치 중..."
+  python -m pip install deep-translator requests
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -99,13 +151,23 @@ if [[ ! -f "$INPUT_SRT" ]]; then
   fi
 fi
 
+case "$ENGINE" in
+  nllb)   ENGINE_LABEL="로컬 NLLB" ;;
+  google) ENGINE_LABEL="구글 번역" ;;
+  ollama) ENGINE_LABEL="로컬 Ollama" ;;
+esac
+
 echo ""
 echo "========================================"
-echo " 2) 번역 (NLLB → 한국어)"
+echo " 2) 번역 ($ENGINE_LABEL → 한국어)"
 echo "    입력: $INPUT_SRT"
 echo "    출력: $OUTPUT_SRT"
 echo "========================================"
-python "$ROOT/import_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT"
+case "$ENGINE" in
+  nllb)   python "$ROOT/import_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+  google) python "$ROOT/google_translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+  ollama) python "$ROOT/translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+esac
 
 echo ""
 echo "완료!"

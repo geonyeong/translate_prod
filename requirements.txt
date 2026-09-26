@@ -6,3 +6,6 @@ torch
 transformers
 sentencepiece
 protobuf
+# Google Translate option
+deep-translator
+requests
