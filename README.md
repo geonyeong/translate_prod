@@ -72,35 +72,38 @@ export GOOGLE_API_KEY="발급받은_API_키"
 
 파일명 인자 없이 `./run.sh`만 실행하면 터미널에서 동영상 경로를 입력받습니다.
 
+> `run.sh`는 내부에서 `venv/bin/python`을 직접 실행하므로 `source venv/bin/activate` 없이 바로 실행하면 됩니다.  
+> (가상환경은 그대로 사용하며, 프로젝트 폴더를 옮겨도 동작합니다.)
+
 ## 수동 실행 (단계별)
 
-통합 스크립트 대신 단계별로 돌릴 수도 있습니다.
+통합 스크립트 대신 단계별로 돌릴 수도 있습니다.  
+`source venv/bin/activate`는 venv를 만든 경로가 고정되어 폴더를 옮기면 동작하지 않으므로, 아래처럼 `venv/bin/python`을 직접 호출하는 방식을 권장합니다.
 
 ```bash
 python3.11 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+venv/bin/python -m pip install --upgrade pip
+venv/bin/python -m pip install -r requirements.txt
 
 # STT
-python -m mlx_qwen3_asr \
+venv/bin/python -m mlx_qwen3_asr \
   --model Qwen/Qwen3-ASR-1.7B \
   --output-format srt \
   --output-dir ./result \
   파일명.mp4
 
 # 번역 (NLLB)
-python import_srt.py \
+venv/bin/python import_srt.py \
   --input ./result/파일명.srt \
   --output ./result/파일명_KOR.srt
 
 # (선택) 구글 번역 (--lang auto|ja|en, 기본 auto)
-python google_translate_srt.py \
+venv/bin/python google_translate_srt.py \
   --input ./result/파일명.srt \
   --output ./result/파일명_KOR.srt
 
 # (선택) Ollama 배치 번역
-python translate_srt.py \
+venv/bin/python translate_srt.py \
   --input ./result/파일명.srt \
   --output ./result/파일명_KOR.srt
 ```

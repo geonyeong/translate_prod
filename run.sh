@@ -98,22 +98,32 @@ if [[ ! -f "$VIDEO" ]]; then
 fi
 
 # --- venv ---
-if [[ ! -d "$ROOT/venv" ]]; then
-  echo "venv가 없어 생성합니다 (python3.11)..."
+# venv/bin/activate hardcodes the path the venv was created at, so it breaks after the
+# project folder is moved. Call the venv interpreter directly instead of activating.
+PY="$ROOT/venv/bin/python"
+
+if [[ ! -x "$PY" ]] || ! "$PY" -c "import sys" >/dev/null 2>&1; then
+  if [[ -d "$ROOT/venv" ]]; then
+    echo "venv가 손상되어 다시 생성합니다 (python3.11)..."
+    rm -rf "$ROOT/venv"
+  else
+    echo "venv가 없어 생성합니다 (python3.11)..."
+  fi
+  if ! command -v python3.11 >/dev/null 2>&1; then
+    echo "오류: python3.11이 없습니다. 'brew install python@3.11'로 설치하세요." >&2
+    exit 1
+  fi
   python3.11 -m venv "$ROOT/venv"
   DO_SETUP=1
 fi
 
-# shellcheck disable=SC1091
-source "$ROOT/venv/bin/activate"
-
-if [[ "$DO_SETUP" -eq 1 ]] || ! python -c "import mlx_qwen3_asr" >/dev/null 2>&1; then
+if [[ "$DO_SETUP" -eq 1 ]] || ! "$PY" -c "import mlx_qwen3_asr" >/dev/null 2>&1; then
   echo "패키지 설치 중..."
-  python -m pip install --upgrade pip
-  python -m pip install -r "$ROOT/requirements.txt"
-elif [[ "$ENGINE" == "google" ]] && ! python -c "import deep_translator, requests" >/dev/null 2>&1; then
+  "$PY" -m pip install --upgrade pip
+  "$PY" -m pip install -r "$ROOT/requirements.txt"
+elif [[ "$ENGINE" == "google" ]] && ! "$PY" -c "import deep_translator, requests" >/dev/null 2>&1; then
   echo "구글 번역 패키지 설치 중..."
-  python -m pip install deep-translator requests
+  "$PY" -m pip install deep-translator requests
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -131,7 +141,7 @@ echo "    모델: $ASR_MODEL"
 echo "    출력: $INPUT_SRT"
 echo "========================================"
 # python -m 으로 호출해 venv 경로 이전 후에도 깨진 shebang에 의존하지 않음
-python -m mlx_qwen3_asr \
+"$PY" -m mlx_qwen3_asr \
   --model "$ASR_MODEL" \
   --output-format srt \
   --output-dir "$OUTPUT_DIR" \
@@ -164,9 +174,9 @@ echo "    입력: $INPUT_SRT"
 echo "    출력: $OUTPUT_SRT"
 echo "========================================"
 case "$ENGINE" in
-  nllb)   python "$ROOT/import_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
-  google) python "$ROOT/google_translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
-  ollama) python "$ROOT/translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+  nllb)   "$PY" "$ROOT/import_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+  google) "$PY" "$ROOT/google_translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
+  ollama) "$PY" "$ROOT/translate_srt.py" --input "$INPUT_SRT" --output "$OUTPUT_SRT" ;;
 esac
 
 echo ""
