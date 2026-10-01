@@ -25,22 +25,46 @@ Thumbs.db
 *.swp
 *~
 
-# Media inputs (keep local only)
+# Video files (keep local only)
 *.mp4
+*.m4v
 *.mkv
 *.mov
 *.avi
 *.webm
+*.wmv
+*.flv
+*.mpg
+*.mpeg
+*.m2ts
+*.mts
+*.3gp
+*.ogv
+
+# Audio files
 *.mp3
 *.wav
 *.m4a
 *.flac
 *.aac
+*.ogg
+*.opus
+
+# Subtitle files
+*.srt
+*.vtt
+*.ass
+*.ssa
+*.smi
+*.sub
+*.idx
+*.sbv
+*.ttml
+*.dfxp
+*.lrc
 
 # Pipeline outputs
 result/
-*.srt
-*.vtt
 *.tsv
 
 # Model / Hugging Face / MLX caches
