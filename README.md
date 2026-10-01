@@ -1,7 +1,8 @@
 # translate_prod
 
 로컬 Mac에서 동영상을 **STT(음성→자막) → 한국어 번역**까지 한 번에 처리하는 파이프라인입니다.  
-STT는 Apple Silicon(MLX)에서 로컬로 동작하고, 번역은 로컬 모델(NLLB / Ollama) 또는 구글 번역 중에서 선택할 수 있습니다.
+STT는 Apple Silicon(MLX)에서 로컬로 동작하고, 번역은 로컬 모델(NLLB / Ollama) 또는 구글 번역 중에서 선택할 수 있습니다.  
+데스크톱 GUI(`./gui.sh`)와 터미널(`./run.sh`) 두 가지 방식으로 사용할 수 있습니다.
 
 ## 사용 환경
 
@@ -23,7 +24,32 @@ STT는 Apple Silicon(MLX)에서 로컬로 동작하고, 번역은 로컬 모델(
 
 > 최초 실행 시 모델 다운로드로 수 분~수십 분이 걸릴 수 있으며, 디스크 공간을 수 GB 이상 사용합니다.
 
-## 빠른 시작
+## GUI로 사용하기 (권장)
+
+![Subtitle Studio GUI](docs/gui.png)
+
+```bash
+cd translate_prod
+./gui.sh            # 최초 실행 시 venv 생성과 패키지 설치를 자동으로 진행
+./gui.sh --setup    # 패키지를 다시 설치하고 실행
+```
+
+1. **실행 모드**를 고릅니다: `자막 + 번역` / `자막만 생성` / `번역만`
+2. **입력 파일**을 창에 끌어다 놓거나 클릭해서 선택합니다.
+   - 동영상(mp4, mkv, mov 등)을 넣으면 자막 추출 모드로, `.srt`를 넣으면 `번역만` 모드로 자동 전환됩니다.
+   - 파일은 복사하지 않고 경로만 사용하므로 수 GB짜리 동영상도 바로 처리됩니다.
+3. **옵션**을 확인합니다: 원본 언어, 음성 인식 모델(1.7B 정확도 / 0.6B 속도), 자막 저장 폴더, 번역 엔진, 구글 API 키(선택)
+4. **시작**을 누르면 단계별 진행률과 남은 시간이 하단에 표시됩니다.
+5. 완료되면 결과 파일을 바로 열거나 Finder에서 확인할 수 있습니다. `자막만 생성` 후에는 **이 자막으로 번역하기** 버튼으로 이어서 번역할 수 있습니다.
+
+GUI의 편의 기능:
+
+- 실행 로그를 펼쳐서 실시간으로 볼 수 있고, 오류가 나면 로그가 자동으로 펼쳐집니다.
+- 언제든 **취소**할 수 있고, 같은 이름의 결과 파일이 있으면 덮어쓰기 전에 확인합니다.
+- 작업 중에는 Mac이 잠자기에 들어가지 않으며, 완료·실패 시 macOS 알림을 보냅니다.
+- 마지막으로 사용한 모드·엔진·언어·저장 폴더를 기억합니다(구글 API 키는 보안상 저장하지 않음).
+
+## 터미널로 사용하기
 
 ```bash
 # 1) 저장소 클론 후 이동
@@ -131,7 +157,7 @@ venv/bin/python google_translate_srt.py \
   --input ./result/파일명.srt \
   --output ./result/파일명_KOR.srt
 
-# (선택) Ollama 배치 번역
+# (선택) Ollama 배치 번역 (--lang ja|en|auto, 기본 ja)
 venv/bin/python translate_srt.py \
   --input ./result/파일명.srt \
   --output ./result/파일명_KOR.srt
@@ -141,16 +167,20 @@ venv/bin/python translate_srt.py \
 
 ```
 translate_prod/
-├── run.sh                  # 실행 모드 선택 (자막+번역 / 자막만 / 번역만)
+├── gui.sh                  # GUI 실행 (venv 준비 후 gui.py 실행)
+├── gui.py                  # 데스크톱 GUI (PySide6)
+├── run.sh                  # 터미널 실행 (자막+번역 / 자막만 / 번역만)
+├── lib/venv.sh             # run.sh / gui.sh 공용 venv 준비 스크립트
 ├── import_srt.py           # NLLB 로컬 번역
 ├── google_translate_srt.py # 구글 번역 (무료 웹 / 공식 API)
 ├── translate_srt.py        # Ollama(qwen3) 배치 번역 (선택)
 ├── requirements.txt
+├── docs/gui.png            # README용 GUI 화면
 ├── .gitignore
 └── result/                 # 자막 출력 (git 제외)
 ```
 
-## 환경 변수 (선택)
+## 환경 변수 (선택, 터미널 실행용)
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
@@ -169,7 +199,9 @@ ASR_MODEL=Qwen/Qwen3-ASR-0.6B ./run.sh video.mp4
 ## 추가 목표 (Roadmap)
 
 1. **GUI**  
-   파일 선택, 언어 선택, 진행률 표시, 결과 미리보기를 제공하는 데스크톱 UI 추가
+   - [x] 실행 모드·파일·옵션 선택, 진행률 표시, 결과 열기를 제공하는 데스크톱 UI (`./gui.sh`)
+   - [ ] 자막 미리보기 및 편집
+   - [ ] 여러 파일 일괄 처리 (대기열)
 
 2. **외부 번역 API 연동**  
    - [x] 구글 번역 (무료 웹 / 공식 Cloud Translation API)

@@ -13,6 +13,8 @@ import ollama
 OLLAMA_MODEL = "qwen3:8b"
 BATCH_SIZE = 15  # M2 16GB optimized batch of subtitle blocks
 
+LANG_NAMES = {"ja": "Japanese", "en": "English", "auto": "source-language"}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Translate SRT with local Ollama qwen3.")
@@ -20,17 +22,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Translated SRT path")
     parser.add_argument("--model", default=OLLAMA_MODEL, help=f"Ollama model (default: {OLLAMA_MODEL})")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE, help=f"Blocks per request (default: {BATCH_SIZE})")
+    parser.add_argument(
+        "--lang",
+        "-l",
+        choices=sorted(LANG_NAMES),
+        default="ja",
+        help="Source language: ja (default), en, auto",
+    )
     return parser.parse_args()
 
 
-def translate_batch(batch_blocks: list[str], model: str) -> str:
+def translate_batch(batch_blocks: list[str], model: str, lang: str = "ja") -> str:
     batch_text = "\n\n".join(batch_blocks)
+    lang_name = LANG_NAMES[lang]
     prompt = (
-        "You are an expert subtitle translator. Translate the following Japanese SRT subtitle batch into natural, contextual Korean.\n"
+        f"You are an expert subtitle translator. Translate the following {lang_name} SRT subtitle batch into natural, contextual Korean.\n"
         "CRITICAL RULES:\n"
         "1. Maintain the exact same SRT format (Index, Timestamp, and Line breaks).\n"
         "2. Do NOT change or translate any numbers, arrow symbols (-->), or timestamps.\n"
-        "3. Translate ONLY the Japanese text into Korean fluidly.\n"
+        f"3. Translate ONLY the {lang_name} text into Korean fluidly.\n"
         "4. Do not add any introduction, explanations, or notes. Output ONLY the translated SRT blocks.\n\n"
         f"{batch_text}"
     )
@@ -43,7 +53,7 @@ def translate_batch(batch_blocks: list[str], model: str) -> str:
         return batch_text
 
 
-def process_srt(input_srt: str, output_srt: str, model: str, batch_size: int) -> None:
+def process_srt(input_srt: str, output_srt: str, model: str, batch_size: int, lang: str = "ja") -> None:
     if not os.path.exists(input_srt):
         print(f"Error: 원본 자막 파일을 찾을 수 없습니다: {input_srt}")
         sys.exit(1)
@@ -59,7 +69,7 @@ def process_srt(input_srt: str, output_srt: str, model: str, batch_size: int) ->
     for i in range(0, len(blocks), batch_size):
         batch = blocks[i : i + batch_size]
         print(f"⚡ 진행 중: {i} ~ {min(i + batch_size, len(blocks))} / 총 {len(blocks)} 단락 처리 중...")
-        translated_content.append(translate_batch(batch, model))
+        translated_content.append(translate_batch(batch, model, lang))
 
     final_srt = "\n\n".join(translated_content)
     os.makedirs(os.path.dirname(os.path.abspath(output_srt)) or ".", exist_ok=True)
@@ -71,4 +81,4 @@ def process_srt(input_srt: str, output_srt: str, model: str, batch_size: int) ->
 
 if __name__ == "__main__":
     args = parse_args()
-    process_srt(args.input, args.output, args.model, args.batch_size)
+    process_srt(args.input, args.output, args.model, args.batch_size, args.lang)

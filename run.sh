@@ -171,32 +171,11 @@ if [[ "$MODE" != "stt" ]]; then
 fi
 
 # --- venv ---
-# venv/bin/activate hardcodes the path the venv was created at, so it breaks after the
-# project folder is moved. Call the venv interpreter directly instead of activating.
-PY="$ROOT/venv/bin/python"
-
-if [[ ! -x "$PY" ]] || ! "$PY" -c "import sys" >/dev/null 2>&1; then
-  if [[ -d "$ROOT/venv" ]]; then
-    echo "venv가 손상되어 다시 생성합니다 (python3.11)..."
-    rm -rf "$ROOT/venv"
-  else
-    echo "venv가 없어 생성합니다 (python3.11)..."
-  fi
-  if ! command -v python3.11 >/dev/null 2>&1; then
-    echo "오류: python3.11이 없습니다. 'brew install python@3.11'로 설치하세요." >&2
-    exit 1
-  fi
-  python3.11 -m venv "$ROOT/venv"
-  DO_SETUP=1
-fi
-
-if [[ "$DO_SETUP" -eq 1 ]] || ! "$PY" -c "import mlx_qwen3_asr" >/dev/null 2>&1; then
-  echo "패키지 설치 중..."
-  "$PY" -m pip install --upgrade pip
-  "$PY" -m pip install -r "$ROOT/requirements.txt"
-elif [[ "$ENGINE" == "google" ]] && ! "$PY" -c "import deep_translator, requests" >/dev/null 2>&1; then
-  echo "구글 번역 패키지 설치 중..."
-  "$PY" -m pip install deep-translator requests
+# shellcheck source=lib/venv.sh
+source "$ROOT/lib/venv.sh"
+ensure_venv "$ROOT" "$DO_SETUP"
+if [[ "$ENGINE" == "google" ]]; then
+  ensure_modules "deep_translator, requests" deep-translator requests
 fi
 
 # --- 1) STT ---

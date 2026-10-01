@@ -9,3 +9,5 @@ protobuf
 # Google Translate option
 deep-translator
 requests
+# Desktop GUI (gui.py)
+PySide6-Essentials
