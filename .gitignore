@@ -86,3 +86,6 @@ models/
 !.env.example
 *.pem
 credentials.json
+
+# Personal translation glossary (see glossary.example.txt)
+glossary.txt

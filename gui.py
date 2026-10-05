@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Desktop GUI for the subtitle pipeline: video -> SRT (Qwen3-ASR) -> Korean SRT.
 
-The GUI runs the same scripts as run.sh (mlx_qwen3_asr, import_srt.py,
+The GUI runs the same scripts as run.sh (mlx_qwen3_asr, srt_cleanup.py, import_srt.py,
 google_translate_srt.py, translate_srt.py) as subprocesses and parses their
 output for progress, so CLI and GUI share one implementation.
 """
@@ -12,9 +12,11 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +27,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QPalette, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -63,22 +66,27 @@ ENGINES = [
 ]
 ENGINE_LABELS = {key: title for key, title, _ in ENGINES}
 ENGINE_HINTS = {
-    "nllb": "facebook/nllb-200 모델로 줄 단위 번역합니다. 인터넷 없이 동작합니다.",
+    "nllb": "facebook/nllb-200 모델로 자막을 문장 단위로 묶어 한꺼번에 번역합니다. 인터넷 없이 동작합니다.",
     "google": "API 키가 없으면 무료 웹 번역을 사용합니다(요청이 많으면 일시 차단될 수 있음).",
-    "ollama": "Ollama의 qwen3:8b로 문맥을 살려 번역합니다. Ollama 앱이 실행 중이어야 합니다.",
+    "ollama": "Ollama의 qwen3:8b가 앞뒤 자막과 용어집을 참고해 번역합니다. 가장 자연스럽지만 느립니다. "
+    "Ollama 앱이 실행 중이어야 합니다.",
 }
+NLLB_MODELS = [
+    ("600m", "NLLB 600M · 빠름"),
+    ("1.3b", "NLLB 1.3B · 고품질 (첫 실행 시 약 5GB 다운로드)"),
+]
 LANGS = {"auto": "자동 감지", "ja": "일본어", "en": "영어"}
 ASR_LANG_NAMES = {"ja": "Japanese", "en": "English"}
 ASR_MODELS = [
-    ("Qwen/Qwen3-ASR-1.7B", "Qwen3-ASR 1.7B · 정확도 우선"),
-    ("Qwen/Qwen3-ASR-0.6B", "Qwen3-ASR 0.6B · 속도 우선"),
+    ("mlx-community/Qwen3-ASR-1.7B-8bit", "Qwen3-ASR 1.7B 8bit · 권장 (약 4배 빠름)"),
+    ("Qwen/Qwen3-ASR-1.7B", "Qwen3-ASR 1.7B 원본 · 느림"),
+    ("Qwen/Qwen3-ASR-0.6B", "Qwen3-ASR 0.6B · 경량"),
 ]
 RUN_LABELS = {"full": "자막 추출 + 번역 시작", "stt": "자막 추출 시작", "translate": "번역 시작"}
 
 STT_PROGRESS_RE = re.compile(r"Progress: chunk (\d+)/(\d+) \(([\d.]+)%\) ETA (\S+)")
 STT_DONE_RE = re.compile(r"Progress: 100\.0%")
 COUNT_RE = re.compile(r"\[(\d+)/(\d+)\]")
-OLLAMA_RE = re.compile(r"(\d+) ~ (\d+) / 총 (\d+)")
 OLLAMA_BATCH_ERROR = "[오류 발생]"
 
 ProgressResult = Optional[tuple[float, Optional[str]]]
@@ -101,10 +109,7 @@ def parse_count(line: str) -> ProgressResult:
     return None
 
 
-def parse_ollama(line: str) -> ProgressResult:
-    m = OLLAMA_RE.search(line)
-    if m and int(m.group(3)) > 0:
-        return int(m.group(1)) / int(m.group(3)), None
+def parse_none(line: str) -> ProgressResult:
     return None
 
 
@@ -230,6 +235,14 @@ QPushButton#accentGhost {
     background: rgba(124, 92, 255, 0.14); border: 1px solid #5B45C9; color: #CFC4FF; font-weight: 600;
 }
 QPushButton#accentGhost:hover { background: rgba(124, 92, 255, 0.24); }
+
+QCheckBox { spacing: 9px; color: #C9CFDB; font-weight: 600; }
+QCheckBox::indicator {
+    width: 16px; height: 16px; border-radius: 5px; border: 1px solid #3A4258; background: #10131A;
+}
+QCheckBox::indicator:hover { border-color: #7C5CFF; }
+QCheckBox::indicator:checked { background: #7C5CFF; border-color: #7C5CFF; }
+QCheckBox:disabled { color: #5A6070; }
 
 QComboBox, QLineEdit {
     background: #10131A; border: 1px solid #2A3040; border-radius: 9px; padding: 7px 10px; min-height: 20px;
@@ -518,7 +531,9 @@ class MainWindow(QMainWindow):
         self.run_mode = "full"
         self.srt_path: Optional[Path] = None
         self.kor_path: Optional[Path] = None
-        self.stt_out_dir: Optional[Path] = None
+        self.stt_tmp_dir: Optional[Path] = None
+        self.stt_json: Optional[Path] = None
+        self.clean_summary = ""
         self.run_started = 0.0
         self.run_started_wall = 0.0
         self.step_started = 0.0
@@ -673,6 +688,45 @@ class MainWindow(QMainWindow):
         key_hint.setText("Google Cloud Translation API 키 (선택). 보안을 위해 저장하지 않습니다.")
         self.row_key = self._field("구글 API 키", self.key_edit, key_hint)
 
+        self.nllb_combo = QComboBox()
+        for key, label in NLLB_MODELS:
+            self.nllb_combo.addItem(label, key)
+        self.row_nllb = self._field("NLLB 모델", self.nllb_combo)
+
+        gloss_widget = QWidget()
+        gloss_layout = QHBoxLayout(gloss_widget)
+        gloss_layout.setContentsMargins(0, 0, 0, 0)
+        gloss_layout.setSpacing(8)
+        self.gloss_edit = QLineEdit()
+        self.gloss_edit.setReadOnly(True)
+        self.gloss_edit.setPlaceholderText("선택 안 함 (프로젝트 폴더의 glossary.txt가 있으면 자동 사용)")
+        gloss_btn = QPushButton("선택")
+        gloss_btn.setCursor(Qt.PointingHandCursor)
+        gloss_btn.clicked.connect(self._choose_glossary)
+        gloss_clear = QPushButton("지우기")
+        gloss_clear.setObjectName("ghost")
+        gloss_clear.setCursor(Qt.PointingHandCursor)
+        gloss_clear.clicked.connect(lambda: self.gloss_edit.clear())
+        gloss_layout.addWidget(self.gloss_edit, 1)
+        gloss_layout.addWidget(gloss_btn)
+        gloss_layout.addWidget(gloss_clear)
+        gloss_hint = self._hint()
+        gloss_hint.setText("'원문 = 번역' 형식의 텍스트 파일. 인물 이름·고유명사를 항상 같은 번역으로 고정합니다.")
+        self.row_gloss = self._field("용어집", gloss_widget, gloss_hint)
+
+        self.clean_check = QCheckBox("자막 정리 (반복·잡음 제거, 짧은 조각 병합)")
+        self.clean_check.setChecked(True)
+        clean_hint = self._hint()
+        clean_hint.setText(
+            "음성 인식이 반복 생성한 문장, 신음·감탄사만 있는 자막을 지우고 문장 단위로 다듬은 뒤 번역합니다."
+        )
+        self.row_clean = QWidget()
+        clean_layout = QVBoxLayout(self.row_clean)
+        clean_layout.setContentsMargins(0, 0, 0, 0)
+        clean_layout.setSpacing(4)
+        clean_layout.addWidget(self.clean_check)
+        clean_layout.addWidget(clean_hint)
+
         top = QHBoxLayout()
         top.setSpacing(14)
         top.addWidget(self.row_lang, 1, Qt.AlignTop)
@@ -681,6 +735,9 @@ class MainWindow(QMainWindow):
         card.body.addWidget(self.row_out)
         card.body.addWidget(self.row_engine)
         card.body.addWidget(self.row_key)
+        card.body.addWidget(self.row_nllb)
+        card.body.addWidget(self.row_gloss)
+        card.body.addWidget(self.row_clean)
 
     def _build_bottom_bar(self) -> QWidget:
         bar = QFrame()
@@ -734,6 +791,10 @@ class MainWindow(QMainWindow):
         self.model_combo.setCurrentIndex(max(0, model_idx))
         out_dir = s.value("out_dir", str(DEFAULT_OUTPUT_DIR))
         self.out_edit.setText(out_dir if Path(out_dir).parent.exists() else str(DEFAULT_OUTPUT_DIR))
+        self.nllb_combo.setCurrentIndex(max(0, self.nllb_combo.findData(s.value("nllb_model", "600m"))))
+        glossary = s.value("glossary", "")
+        self.gloss_edit.setText(glossary if glossary and Path(glossary).is_file() else "")
+        self.clean_check.setChecked(str(s.value("clean", "true")).lower() == "true")
         mode = s.value("mode", "full")
         self.mode_seg.set_value(mode if mode in {key for key, _, _ in MODES} else "full")
         self._on_mode_changed(self.mode_seg.value())
@@ -750,6 +811,9 @@ class MainWindow(QMainWindow):
         s.setValue("lang", self.lang_combo.currentData() or "ja")
         s.setValue("asr_model", self.model_combo.currentData())
         s.setValue("out_dir", self.out_edit.text())
+        s.setValue("nllb_model", self.nllb_combo.currentData())
+        s.setValue("glossary", self.gloss_edit.text())
+        s.setValue("clean", "true" if self.clean_check.isChecked() else "false")
         s.setValue("geometry", self.saveGeometry())
 
     # ---------- mode / file ----------
@@ -823,6 +887,12 @@ class MainWindow(QMainWindow):
         if path:
             self.out_edit.setText(path)
 
+    def _choose_glossary(self) -> None:
+        start = self.gloss_edit.text() or str(ROOT)
+        path, _ = QFileDialog.getOpenFileName(self, "용어집 파일 선택", start, "텍스트 (*.txt *.tsv);;모든 파일 (*)")
+        if path:
+            self.gloss_edit.setText(path)
+
     def _open_out_dir(self) -> None:
         out_dir = Path(self.out_edit.text()).expanduser()
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -839,6 +909,8 @@ class MainWindow(QMainWindow):
         self.row_out.setVisible(needs_stt)
         self.row_engine.setVisible(needs_tr)
         self.row_key.setVisible(needs_tr and engine == "google")
+        self.row_nllb.setVisible(needs_tr and engine == "nllb")
+        self.row_gloss.setVisible(needs_tr and engine == "ollama")
         self.engine_hint.setText(ENGINE_HINTS[engine])
 
         allow_auto = not (needs_tr and engine == "nllb")
@@ -867,7 +939,7 @@ class MainWindow(QMainWindow):
     def _planned_titles(mode: str, engine: str) -> list[str]:
         titles = []
         if mode in ("full", "stt"):
-            titles.append("자막 추출")
+            titles += ["자막 추출", "자막 정리"]
         if mode in ("full", "translate"):
             titles.append(f"번역 · {ENGINE_LABELS[engine]}")
         return titles
@@ -919,10 +991,8 @@ class MainWindow(QMainWindow):
             out_dir = Path(self.out_edit.text()).expanduser()
             out_dir.mkdir(parents=True, exist_ok=True)
             srt_path = out_dir / f"{source.stem}.srt"
-            self.stt_out_dir = out_dir
         else:
             srt_path = source
-            self.stt_out_dir = None
         kor_path = srt_path.with_name(f"{srt_path.stem}_KOR.srt") if needs_tr else None
 
         targets = ([srt_path] if needs_stt else []) + ([kor_path] if kor_path else [])
@@ -944,18 +1014,27 @@ class MainWindow(QMainWindow):
         self.run_engine = engine
         self.run_lang = self.lang_combo.currentData()
         self.run_model = self.model_combo.currentData()
+        self.run_clean = self.clean_check.isChecked()
+        self.run_nllb = self.nllb_combo.currentData()
+        self.run_glossary = self.gloss_edit.text().strip()
         self.srt_path = srt_path
         self.kor_path = kor_path
         self.batch_errors = 0
+        self.clean_summary = ""
+        self._remove_stt_tmp()
+        self.stt_tmp_dir = Path(tempfile.mkdtemp(prefix="subtitle_stt_")) if needs_stt else None
+        self.stt_json = None
 
         self.steps = []
         if needs_stt:
             self.steps.append(Step("stt", "자막 추출", "자막 추출 중", self._stt_args, parse_stt, self._finish_stt))
+            self.steps.append(
+                Step("clean", "자막 정리", "자막 정리 중", self._clean_args, parse_none, self._finish_clean)
+            )
         if needs_tr:
             label = ENGINE_LABELS[engine]
-            parser = parse_ollama if engine == "ollama" else parse_count
             self.steps.append(
-                Step("translate", f"번역 · {label}", f"번역 중 ({label})", self._translate_args, parser,
+                Step("translate", f"번역 · {label}", f"번역 중 ({label})", self._translate_args, parse_count,
                      self._finish_translate)
             )
 
@@ -974,15 +1053,29 @@ class MainWindow(QMainWindow):
         self._run_step(0)
 
     def _stt_args(self) -> list[str]:
+        # The stock SRT writer drops punctuation and cuts every 10 words; the JSON keeps the
+        # punctuated transcript + word timestamps so srt_cleanup.py can rebuild sentence cues.
         args = [
             "-m", "mlx_qwen3_asr",
             "--model", self.run_model,
-            "--output-format", "srt",
-            "--output-dir", str(self.stt_out_dir),
+            "--output-format", "json",
+            "--timestamps",
+            "--output-dir", str(self.stt_tmp_dir),
         ]
         if self.run_lang in ASR_LANG_NAMES:
             args += ["--language", ASR_LANG_NAMES[self.run_lang]]
         args.append(str(self.run_source))
+        return args
+
+    def _clean_args(self) -> list[str]:
+        args = [
+            str(ROOT / "srt_cleanup.py"),
+            "--input", str(self.stt_json),
+            "--output", str(self.srt_path),
+            "--lang", self.run_lang,
+        ]
+        if not self.run_clean:
+            args.append("--no-clean")
         return args
 
     def _translate_args(self) -> list[str]:
@@ -991,31 +1084,41 @@ class MainWindow(QMainWindow):
             "google": "google_translate_srt.py",
             "ollama": "translate_srt.py",
         }[self.run_engine]
-        return [
+        args = [
             str(ROOT / script),
             "--input", str(self.srt_path),
             "--output", str(self.kor_path),
             "--lang", self.run_lang,
         ]
+        if self.run_engine == "nllb":
+            args += ["--model", self.run_nllb]
+        if self.run_engine == "ollama" and self.run_glossary:
+            args += ["--glossary", self.run_glossary]
+        if not self.run_clean:
+            args.append("--no-clean")
+        return args
 
     def _is_fresh(self, path: Optional[Path]) -> bool:
         return path is not None and path.is_file() and path.stat().st_mtime >= self.run_started_wall - 1
 
     def _finish_stt(self) -> Optional[str]:
-        if self._is_fresh(self.srt_path):
-            return None
-        candidates = sorted(
-            (p for p in self.stt_out_dir.glob("*.srt") if self._is_fresh(p) and not p.stem.endswith("_KOR")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        candidates = sorted(self.stt_tmp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         if candidates:
-            self.srt_path = candidates[0]
-            if self.kor_path is not None:
-                self.kor_path = self.srt_path.with_name(f"{self.srt_path.stem}_KOR.srt")
-            self.log.append_line(f"알림: 예상과 다른 이름의 자막을 사용합니다 → {self.srt_path}")
+            self.stt_json = candidates[0]
+            return None
+        return "음성 인식 결과가 생성되지 않았습니다. 로그를 확인하세요."
+
+    def _finish_clean(self) -> Optional[str]:
+        if self._is_fresh(self.srt_path):
+            self._remove_stt_tmp()
             return None
         return "자막 파일이 생성되지 않았습니다. 로그를 확인하세요."
+
+    def _remove_stt_tmp(self) -> None:
+        tmp_dir = getattr(self, "stt_tmp_dir", None)
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            self.stt_tmp_dir = None
 
     def _finish_translate(self) -> Optional[str]:
         if self._is_fresh(self.kor_path):
@@ -1030,7 +1133,7 @@ class MainWindow(QMainWindow):
         states = ["done"] * index + ["active"] + ["pending"] * (len(self.steps) - index - 1)
         self._set_chips([s.title for s in self.steps], states)
         self.progress.setRange(0, 0)
-        self.status_label.setText(f"{step.doing} · 모델을 불러오는 중…")
+        self.status_label.setText(f"{step.doing}…" if step.key == "clean" else f"{step.doing} · 모델을 불러오는 중…")
 
         args = step.build()
         self.log.append_line(f"▶ [{index + 1}/{len(self.steps)}] {step.title}")
@@ -1075,6 +1178,8 @@ class MainWindow(QMainWindow):
     def _handle_line(self, line: str) -> None:
         if OLLAMA_BATCH_ERROR in line:
             self.batch_errors += 1
+        if line.startswith("🧹 자막 정리:") and not self.clean_summary:
+            self.clean_summary = line.split(":", 1)[1].strip()
         if not (0 <= self.step_index < len(self.steps)):
             return
         result = self.steps[self.step_index].parse(line)
@@ -1141,6 +1246,7 @@ class MainWindow(QMainWindow):
     def _end_run(self, state: str, message: Optional[str] = None) -> None:
         self.running = False
         self.timer.stop()
+        self._remove_stt_tmp()
         elapsed = fmt_duration(time.monotonic() - self.run_started)
         self._set_inputs_enabled(True)
         self.cancel_btn.hide()
@@ -1189,6 +1295,12 @@ class MainWindow(QMainWindow):
             self.result_body.addWidget(self._result_row("원본 자막", self.srt_path))
         if self.kor_path:
             self.result_body.addWidget(self._result_row("한글 자막", self.kor_path))
+
+        if self.clean_summary:
+            summary = QLabel(f"자막 정리 · {self.clean_summary}")
+            summary.setObjectName("hint")
+            summary.setWordWrap(True)
+            self.result_body.addWidget(summary)
 
         if self.batch_errors:
             warning = QLabel(f"⚠  일부 구간({self.batch_errors}개 묶음)은 번역에 실패해 원문이 유지되었습니다.")
@@ -1260,6 +1372,7 @@ class MainWindow(QMainWindow):
             if not self.proc.waitForFinished(5000):
                 self.proc.kill()
                 self.proc.waitForFinished(2000)
+        self._remove_stt_tmp()
         self._save_settings()
         event.accept()
 

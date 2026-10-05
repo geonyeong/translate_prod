@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Subtitle pipeline: video -> SRT (Qwen3-ASR) -> Korean SRT (NLLB / Google / Ollama)
 # Usage:
-#   ./run.sh                                   # menus for mode, file, engine
-#   ./run.sh video.mp4                         # pick mode/engine from menus
-#   ./run.sh video.mp4 --mode full --engine google
+#   ./run.sh                                   # menus for mode, file, engine, language
+#   ./run.sh video.mp4                         # pick mode/engine/language from menus
+#   ./run.sh video.mp4 --mode full --engine ollama --lang ja
 #   ./run.sh video.mp4 --mode stt
 #   ./run.sh result/video.srt --mode translate --engine nllb
 #   ./run.sh video.mp4 --setup                 # also (re)install packages
@@ -12,24 +12,28 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-ASR_MODEL="${ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}"
+ASR_MODEL="${ASR_MODEL:-mlx-community/Qwen3-ASR-1.7B-8bit}"
 OUTPUT_DIR="${OUTPUT_DIR:-./result}"
 ENGINE="${TRANSLATE_ENGINE:-}"
 MODE="${RUN_MODE:-}"
+SRC_LANG="${SRC_LANG:-}"
+CLEAN="${CLEAN:-1}"
 DO_SETUP=0
 INPUT=""
 
 usage() {
-  echo "Usage: ./run.sh [file] [--mode full|stt|translate] [--engine nllb|google|ollama] [--setup]"
+  echo "Usage: ./run.sh [file] [--mode full|stt|translate] [--engine nllb|google|ollama] [--lang ja|en|auto] [--no-clean] [--setup]"
   echo "  file            동영상 경로 (translate 모드는 .srt 경로). 생략 시 입력 요청"
   echo "  --mode, -m      실행 모드 (생략 시 선택 메뉴 표시)"
   echo "                    full      : 동영상 → 자막 → 번역 자막 (한 번에)"
   echo "                    stt       : 동영상 → 자막만 생성"
   echo "                    translate : 기존 자막(.srt) → 번역 자막만 생성"
   echo "  --engine, -e    번역 엔진 (생략 시 선택 메뉴 표시, stt 모드에서는 무시)"
-  echo "                    nllb   : 로컬 NLLB 모델 (오프라인)"
+  echo "                    nllb   : 로컬 NLLB 모델 (오프라인, 빠름)"
   echo "                    google : 구글 번역 (GOOGLE_API_KEY 있으면 공식 API, 없으면 무료 웹)"
-  echo "                    ollama : 로컬 Ollama qwen3"
+  echo "                    ollama : 로컬 Ollama qwen3 (앞뒤 문맥을 보고 번역, 품질 우선)"
+  echo "  --lang, -l      원본 언어 ja | en | auto (생략 시 선택 메뉴). 음성 인식과 번역에 모두 사용"
+  echo "  --no-clean      자막 정리(반복·잡음 제거, 조각 병합) 끄기"
   echo "  --setup, -s     venv 생성 및 requirements 설치"
 }
 
@@ -55,6 +59,13 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --mode=*) MODE="${1#*=}" ;;
+    --lang|-l)
+      require_value "$@"
+      SRC_LANG="$2"
+      shift
+      ;;
+    --lang=*) SRC_LANG="${1#*=}" ;;
+    --no-clean) CLEAN=0 ;;
     -h|--help)
       usage
       exit 0
@@ -170,6 +181,51 @@ if [[ "$MODE" != "stt" ]]; then
   esac
 fi
 
+# --- 원본 언어 (음성 인식 언어 고정 + 번역 원문 언어) ---
+ALLOW_AUTO=1
+if [[ "$MODE" != "stt" && "$ENGINE" == "nllb" ]]; then
+  ALLOW_AUTO=0
+fi
+if [[ -z "$SRC_LANG" ]]; then
+  echo "========================================"
+  echo " 원본 언어를 선택하세요. (음성 인식·번역에 사용)"
+  echo " [1] 일본어 (기본값)"
+  echo " [2] 영어"
+  if [[ "$ALLOW_AUTO" == "1" ]]; then
+    echo " [3] 자동 감지"
+  fi
+  echo "========================================"
+  read -r -p "👉 선택 (Enter = 1): " LANG_CHOICE
+  case "${LANG_CHOICE:-1}" in
+    1) SRC_LANG="ja" ;;
+    2) SRC_LANG="en" ;;
+    3) SRC_LANG="auto" ;;
+    *)
+      echo "잘못된 선택입니다: $LANG_CHOICE" >&2
+      exit 1
+      ;;
+  esac
+fi
+SRC_LANG="$(echo "$SRC_LANG" | tr '[:upper:]' '[:lower:]')"
+case "$SRC_LANG" in
+  ja|en) ;;
+  auto)
+    if [[ "$ALLOW_AUTO" == "0" ]]; then
+      echo "NLLB 번역은 원본 언어를 직접 지정해야 합니다 (--lang ja | en)." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "지원하지 않는 언어: $SRC_LANG (ja | en | auto)" >&2
+    exit 1
+    ;;
+esac
+
+CLEAN_ARGS=()
+if [[ "$CLEAN" == "0" ]]; then
+  CLEAN_ARGS=(--no-clean)
+fi
+
 # --- venv ---
 # shellcheck source=lib/venv.sh
 source "$ROOT/lib/venv.sh"
@@ -187,32 +243,42 @@ run_stt() {
   stem="${stem%.*}"
   SRT_FILE="$OUTPUT_DIR/${stem}.srt"
 
+  local lang_args=()
+  case "$SRC_LANG" in
+    ja) lang_args=(--language Japanese) ;;
+    en) lang_args=(--language English) ;;
+  esac
+
   echo ""
   echo "========================================"
   echo " STT (mlx-qwen3-asr)"
   echo "    입력: $INPUT"
   echo "    모델: $ASR_MODEL"
+  echo "    언어: $SRC_LANG"
   echo "    출력: $SRT_FILE"
   echo "========================================"
+  # 기본 SRT 출력은 문장부호가 빠지고 10단어마다 끊기므로, 문장부호가 살아있는 JSON(+단어 타임스탬프)을
+  # 임시 폴더에 받은 뒤 srt_cleanup.py가 문장 단위 자막으로 다시 만든다.
+  local tmp_dir json_file
+  tmp_dir="$(mktemp -d)"
   # python -m 으로 호출해 venv 경로 이전 후에도 깨진 shebang에 의존하지 않음
   "$PY" -m mlx_qwen3_asr \
     --model "$ASR_MODEL" \
-    --output-format srt \
-    --output-dir "$OUTPUT_DIR" \
+    --output-format json \
+    --timestamps \
+    --output-dir "$tmp_dir" \
+    ${lang_args[@]+"${lang_args[@]}"} \
     "$INPUT"
 
-  if [[ ! -f "$SRT_FILE" ]]; then
-    # 혹시 stem이 다를 경우 최신 srt 탐색
-    local newest
-    newest="$(ls -t "$OUTPUT_DIR"/*.srt 2>/dev/null | head -n 1 || true)"
-    if [[ -n "$newest" && -f "$newest" ]]; then
-      SRT_FILE="$newest"
-      echo "알림: 예상과 다른 SRT 이름을 감지해 사용합니다 → $SRT_FILE"
-    else
-      echo "오류: SRT가 생성되지 않았습니다 ($OUTPUT_DIR)." >&2
-      exit 1
-    fi
+  json_file="$(ls "$tmp_dir"/*.json 2>/dev/null | head -n 1 || true)"
+  if [[ -z "$json_file" ]]; then
+    rm -rf "$tmp_dir"
+    echo "오류: 음성 인식 결과가 생성되지 않았습니다." >&2
+    exit 1
   fi
+  "$PY" "$ROOT/srt_cleanup.py" --input "$json_file" --output "$SRT_FILE" --lang "$SRC_LANG" \
+    ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}
+  rm -rf "$tmp_dir"
 }
 
 # --- 2) 번역 ---
@@ -236,11 +302,14 @@ run_translate() {
   echo "    입력: $src"
   echo "    출력: $KOR_FILE"
   echo "========================================"
+  local script
   case "$ENGINE" in
-    nllb)   "$PY" "$ROOT/import_srt.py" --input "$src" --output "$KOR_FILE" ;;
-    google) "$PY" "$ROOT/google_translate_srt.py" --input "$src" --output "$KOR_FILE" ;;
-    ollama) "$PY" "$ROOT/translate_srt.py" --input "$src" --output "$KOR_FILE" ;;
+    nllb)   script="import_srt.py" ;;
+    google) script="google_translate_srt.py" ;;
+    ollama) script="translate_srt.py" ;;
   esac
+  "$PY" "$ROOT/$script" --input "$src" --output "$KOR_FILE" --lang "$SRC_LANG" \
+    ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}
 }
 
 case "$MODE" in

@@ -14,7 +14,8 @@ import sys
 import time
 
 import requests
-import srt
+
+from srt_cleanup import prepare_for_translation, save_cues, wrap_lines
 
 CLOUD_ENDPOINT = "https://translation.googleapis.com/language/translate/v2"
 # Free endpoint rejects requests over 5000 chars; Cloud API recommends <= 128 segments per call.
@@ -50,6 +51,7 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("GOOGLE_API_KEY"),
         help="Google Cloud Translation API key (default: $GOOGLE_API_KEY). Omit to use the free web endpoint.",
     )
+    parser.add_argument("--no-clean", action="store_true", help="Skip subtitle cleanup before translating")
     return parser.parse_args()
 
 
@@ -143,22 +145,14 @@ def main() -> None:
         print("🌐 Google 번역 (무료 웹, API 키 없음)으로 번역합니다. 요청이 많으면 일시 차단될 수 있습니다.")
         translator = FreeTranslator(source, args.target)
 
-    with open(args.input, "r", encoding="utf-8-sig", errors="ignore") as f:
-        subtitles = list(srt.parse(f.read()))
+    cues = prepare_for_translation(args.input, source, clean=not args.no_clean)
+    # One cue = one sentence-level request line; identical lines are sent once.
+    texts = [" ".join(c.text.split()) for c in cues]
+    unique = list(dict.fromkeys(texts))
 
-    # Flatten non-empty lines so they can be batched, then map results back.
-    positions: list[tuple[int, int]] = []
-    lines: list[str] = []
-    split_contents = [sub.content.strip().split("\n") for sub in subtitles]
-    for sub_idx, sub_lines in enumerate(split_contents):
-        for line_idx, line in enumerate(sub_lines):
-            if line.strip():
-                positions.append((sub_idx, line_idx))
-                lines.append(line.strip())
-
-    print(f"🚀 번역 시작: 자막 {len(subtitles)}개 / {len(lines)}줄 ({source} ➡️ {args.target})")
+    print(f"🚀 번역 시작: 자막 {len(cues)}개 (고유 {len(unique)}개) ({source} ➡️ {args.target})")
     try:
-        translated = translator.translate(lines)
+        translated = dict(zip(unique, translator.translate(unique)))
     except Exception as e:
         print(f"\n❌ 번역 실패: {e}")
         if not args.api_key and "too many requests" in str(e).lower():
@@ -166,14 +160,9 @@ def main() -> None:
             print("   잠시 후 다시 시도하거나, VPN을 끄거나, GOOGLE_API_KEY를 설정해 공식 API를 사용하세요.")
         sys.exit(1)
 
-    for (sub_idx, line_idx), text in zip(positions, translated):
-        split_contents[sub_idx][line_idx] = text
-    for sub, sub_lines in zip(subtitles, split_contents):
-        sub.content = "\n".join(sub_lines).strip()
-
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)) or ".", exist_ok=True)
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(srt.compose(subtitles))
+    for cue, text in zip(cues, texts):
+        cue.text = wrap_lines(translated.get(text) or text, 22)
+    save_cues(args.output, cues)
 
     print(f"\n🎉 구글 번역 완료! '{args.output}' 파일이 생성되었습니다.")
 
