@@ -85,6 +85,25 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def load_model(model_name: str, src_lang: str, device: torch.device):
+    dtype = torch.float16 if device.type == "mps" else torch.float32
+
+    def load(local_only: bool):
+        tokenizer = AutoTokenizer.from_pretrained(model_name, src_lang=src_lang, local_files_only=local_only)
+        model = AutoModelForSeq2SeqLM.from_pretrained(model_name, dtype=dtype, local_files_only=local_only)
+        return tokenizer, model
+
+    try:
+        # A cached model loads without contacting the Hub (no update check, no rate-limit warning).
+        tokenizer, model = load(local_only=True)
+    except OSError:
+        print("📥 모델이 없어 Hugging Face에서 내려받습니다...")
+        tokenizer, model = load(local_only=False)
+    model = model.to(device).eval()
+    model.generation_config.max_length = None
+    return tokenizer, model
+
+
 def translate_unique(texts: list[str], tokenizer, model, device, batch_size: int) -> dict[str, str]:
     unique = sorted(set(texts), key=len)
     bos = tokenizer.convert_tokens_to_ids(TGT_LANG)
@@ -117,10 +136,7 @@ def main() -> None:
     device = pick_device()
 
     print(f"⏳ 로컬 AI 번역 모델({model_name})을 로드하고 있습니다... (최초 실행 시 다운로드로 인해 수 분 소요)")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, src_lang=src_lang)
-    dtype = torch.float16 if device.type == "mps" else torch.float32
-    model = AutoModelForSeq2SeqLM.from_pretrained(model_name, dtype=dtype).to(device).eval()
-    model.generation_config.max_length = None
+    tokenizer, model = load_model(model_name, src_lang, device)
 
     print(f"\n📂 '{input_srt}' 자막 파일을 읽고 있습니다...")
     cues = prepare_for_translation(input_srt, lang_code, clean=not args.no_clean)
