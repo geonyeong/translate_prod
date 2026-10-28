@@ -70,7 +70,9 @@ mlx-qwen3-asr의 기본 SRT 출력은 **문장부호가 모두 빠지고 10단�
 - 같은 말이 반복되거나, 조사로 끝나 문장이 끊긴 줄
 - 앞 자막과 이어지는 짧은 조각
 
-교정에 실패하면 그 줄은 NLLB 초안을 유지합니다. 문제 없는 줄은 Ollama를 호출하지 않으므로, 대부분의 자막은 NLLB 속도로 끝나고 어색한 줄만 문맥 교정을 받습니다. Ollama 앱이 실행 중이어야 합니다.
+교정에 실패하면 그 줄은 NLLB 초안을 유지합니다. 문제 없는 줄은 Ollama를 호출하지 않으므로, 대부분의 자막은 NLLB 속도로 끝나고 어색한 줄만 문맥 교정을 받습니다.
+
+Ollama가 꺼져 있으면 번역 스크립트가 macOS Ollama 앱을 실행하고, 앱이 없으면 `ollama serve`로 서버를 띄웁니다. NLLB+교정은 그래도 켜지지 않으면 교정을 건너뛰고 NLLB 초안을 저장합니다. Ollama 엔진은 서버가 켜지지 않으면 번역을 중단합니다.
 
 Ollama 문맥 번역의 안정성 장치:
 
@@ -116,6 +118,7 @@ GUI의 편의 기능:
 - 언제든 **취소**할 수 있고, 같은 이름의 결과 파일이 있으면 덮어쓰기 전에 확인합니다.
 - 작업 중에는 Mac이 잠자기에 들어가지 않으며, 완료·실패 시 macOS 알림을 보냅니다.
 - 마지막으로 사용한 모드·엔진·언어·저장 폴더·NLLB 모델·용어집·자막 정리 설정을 기억합니다(구글 API 키는 보안상 저장하지 않음).
+- Ollama가 꺼져 있어도 시작을 누르면 앱을 먼저 실행합니다. NLLB+교정은 켜지지 않으면 교정만 건너뛰고, 결과 화면에 그 사실을 표시합니다.
 
 ## 터미널로 사용하기
 
@@ -266,6 +269,7 @@ translate_prod/
 ├── google_translate_srt.py # 구글 번역 (무료 웹 / 공식 API)
 ├── translate_srt.py        # Ollama(qwen3) 문맥 번역 + 용어집
 ├── hybrid_translate_srt.py # NLLB 초안 + 어색한 줄만 Ollama 교정
+├── ollama_boot.py          # Ollama가 꺼져 있으면 실행, 실패 시 교정 단계는 건너뜀
 ├── glossary.example.txt    # 용어집 예시 (glossary.txt로 복사해 사용, git 제외)
 ├── requirements.txt
 ├── docs/gui.png            # README용 GUI 화면
@@ -312,6 +316,7 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
    - [x] Ollama 문맥 번역 (앞뒤 자막 참고, JSON 검증, 용어집)
    - [x] NLLB 일괄 번역(FP16) + 1.3B 모델 선택, STT 8bit 모델 기본 적용
    - [x] NLLB 초안 후 어색한 줄만 Ollama 교정 (`hybrid`)
+   - [x] Ollama가 꺼져 있으면 자동 실행, 실패 시 NLLB+교정은 교정만 건너뜀
    - [ ] 화자 구분(`--diarize`)을 번역 문맥에 반영
    - [ ] 번역 중단 시 이어서 번역 (체크포인트)
 
@@ -319,6 +324,6 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
 
 - `venv/`, 동영상·자막 결과물, Hugging Face/MLX 캐시, 개인 용어집(`glossary.txt`)은 `.gitignore`에 포함되어 저장소에 올라가지 않습니다.
 - 프로젝트 경로를 옮긴 뒤에는 `./run.sh 파일명.mp4 --setup`으로 venv를 다시 맞추는 것을 권장합니다.
-- Ollama 경로를 쓰려면 별도로 [Ollama](https://ollama.com) 설치 및 `ollama pull qwen3:8b`가 필요합니다. 다른 모델을 쓰려면 `OLLAMA_MODEL`을 지정하세요.
+- Ollama 경로를 쓰려면 별도로 [Ollama](https://ollama.com) 설치 및 `ollama pull qwen3:8b`가 필요합니다. 다른 모델을 쓰려면 `OLLAMA_MODEL`을 지정하세요. 서버가 꺼져 있으면 번역 중에 Ollama 앱(없으면 `ollama serve`)을 자동으로 실행합니다.
 - 모델 다운로드가 0%에서 멈추면 `HF_HUB_DISABLE_XET=1 ./run.sh ...`처럼 Hugging Face의 xet 전송을 끄고 다시 시도해 보세요.
 - Ollama 문맥 번역이 끝난 뒤 qwen3(약 5GB)는 1분 동안 메모리에 남아 있습니다. 16GB Mac에서는 이 상태로 음성 인식을 돌리면 3배 이상 느려지므로(측정: 2분 9초 → 7분 37초), 바로 다음 작업을 할 때는 1분 정도 기다리거나 `ollama stop qwen3:8b`로 내린 뒤 실행하세요.

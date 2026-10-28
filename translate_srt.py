@@ -17,6 +17,7 @@ from pathlib import Path
 
 import ollama
 
+from ollama_boot import ensure_ollama
 from srt_cleanup import Cue, prepare_for_translation, save_cues, wrap_lines
 
 ROOT = Path(__file__).resolve().parent
@@ -285,11 +286,14 @@ def main() -> None:
         print(f"❌ 오류: 원본 자막 파일을 찾을 수 없습니다: {args.input}")
         sys.exit(1)
 
+    if not ensure_ollama():
+        print("❌ Ollama를 실행하지 못했습니다. Ollama 앱 또는 'ollama' 명령이 설치되어 있는지 확인해 주세요.")
+        sys.exit(1)
     try:
         ollama.show(args.model)
     except Exception as e:
         print(f"❌ Ollama 모델을 사용할 수 없습니다 ({args.model}): {e}")
-        print("💡 Ollama 앱을 실행하고 'ollama pull qwen3:8b'로 모델을 받아 주세요.")
+        print("💡 'ollama pull qwen3:8b'로 모델을 받아 주세요.")
         sys.exit(1)
 
     cues: list[Cue] = prepare_for_translation(args.input, args.lang, clean=not args.no_clean)

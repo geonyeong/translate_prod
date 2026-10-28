@@ -19,6 +19,7 @@ from collections import Counter
 import torch
 
 from import_srt import load_model, pick_device, resolve_src_lang, translate_unique
+from ollama_boot import ensure_ollama
 from srt_cleanup import ends_sentence, prepare_for_translation, save_cues, wrap_lines
 from translate_srt import (
     DEFAULT_GLOSSARY,
@@ -199,6 +200,21 @@ def polish(
     return revised, failed
 
 
+def _ollama_ready(model_name: str) -> bool:
+    """Start Ollama if it is off. Return False when correction should be skipped."""
+    if not ensure_ollama():
+        return False
+    try:
+        import ollama
+
+        ollama.show(model_name)
+    except Exception as e:
+        print(f"⚠️ Ollama 모델을 사용할 수 없습니다 ({model_name}): {e}")
+        print("💡 'ollama pull qwen3:8b'로 모델을 받은 뒤 다시 실행하면 교정만 이어서 할 수 있습니다.")
+        return False
+    return True
+
+
 def release_model(model, tokenizer) -> None:
     del model, tokenizer
     gc.collect()
@@ -210,15 +226,6 @@ def main() -> None:
     args = parse_args()
     if not os.path.exists(args.input):
         print(f"❌ 오류: 파일 '{args.input}'이 없습니다. 경로를 확인해주세요.")
-        sys.exit(1)
-
-    try:
-        import ollama
-
-        ollama.show(args.model)
-    except Exception as e:
-        print(f"❌ Ollama 모델을 사용할 수 없습니다 ({args.model}): {e}")
-        print("💡 Ollama 앱을 실행하고 'ollama pull qwen3:8b'로 모델을 받아 주세요.")
         sys.exit(1)
 
     _src_lang, lang_name, lang_code = resolve_src_lang(args.lang)
@@ -248,6 +255,9 @@ def main() -> None:
     print()
     if not flagged:
         print(f"✨ 교정할 줄이 없습니다. NLLB 초안 {len(texts)}줄을 그대로 저장합니다.")
+        polished, failed = drafts, 0
+    elif not _ollama_ready(args.model):
+        print("⚠️ 교정을 건너뛰고 NLLB 초안을 저장합니다.")
         polished, failed = drafts, 0
     else:
         detail = ", ".join(f"{name} {count}" for name, count in counts.most_common())

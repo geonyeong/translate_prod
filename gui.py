@@ -13,7 +13,6 @@ import os
 import re
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -69,10 +68,10 @@ ENGINE_LABELS = {key: title for key, title, _ in ENGINES}
 ENGINE_HINTS = {
     "nllb": "facebook/nllb-200 모델로 자막을 문장 단위로 묶어 한꺼번에 번역합니다. 인터넷 없이 동작합니다.",
     "hybrid": "NLLB로 전체를 번역한 뒤, 일본어가 남거나 용어가 어긋나거나 짧게 끊긴 줄만 Ollama가 고칩니다. "
-    "Ollama 앱이 실행 중이어야 합니다.",
+    "Ollama가 꺼져 있으면 앱을 실행하고, 켜지지 않으면 교정만 건너뜁니다.",
     "google": "API 키가 없으면 무료 웹 번역을 사용합니다(요청이 많으면 일시 차단될 수 있음).",
     "ollama": "Ollama의 qwen3:8b가 앞뒤 자막과 용어집을 참고해 번역합니다. 가장 자연스럽지만 느립니다. "
-    "Ollama 앱이 실행 중이어야 합니다.",
+    "Ollama가 꺼져 있으면 앱을 실행한 뒤 번역합니다.",
 }
 NLLB_MODELS = [
     ("600m", "NLLB 600M · 빠름"),
@@ -135,14 +134,6 @@ def short_path(path: Path) -> str:
     home = str(Path.home())
     text = str(path)
     return "~" + text[len(home):] if text.startswith(home) else text
-
-
-def ollama_running() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 11434), timeout=0.5):
-            return True
-    except OSError:
-        return False
 
 
 def notify(title: str, message: str) -> None:
@@ -541,6 +532,7 @@ class MainWindow(QMainWindow):
         self.run_started_wall = 0.0
         self.step_started = 0.0
         self.batch_errors = 0
+        self.ollama_skipped = ""
         self._line_buf = ""
         self.timer = QTimer(self)
         self.timer.setInterval(1000)
@@ -982,14 +974,6 @@ class MainWindow(QMainWindow):
         needs_stt = mode in ("full", "stt")
         needs_tr = mode in ("full", "translate")
 
-        if needs_tr and engine in ("ollama", "hybrid") and not ollama_running():
-            QMessageBox.warning(
-                self,
-                "Ollama가 실행 중이 아닙니다",
-                "Ollama 앱을 실행한 뒤 다시 시도하세요.\n(필요 시 터미널에서 'ollama pull qwen3:8b')",
-            )
-            return
-
         if needs_stt:
             out_dir = Path(self.out_edit.text()).expanduser()
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -1024,6 +1008,7 @@ class MainWindow(QMainWindow):
         self.kor_path = kor_path
         self.batch_errors = 0
         self.clean_summary = ""
+        self.ollama_skipped = ""
         self._remove_stt_tmp()
         self.stt_tmp_dir = Path(tempfile.mkdtemp(prefix="subtitle_stt_")) if needs_stt else None
         self.stt_json = None
@@ -1184,6 +1169,8 @@ class MainWindow(QMainWindow):
     def _handle_line(self, line: str) -> None:
         if OLLAMA_BATCH_ERROR in line:
             self.batch_errors += 1
+        if "교정을 건너뛰고" in line:
+            self.ollama_skipped = line.strip()
         if line.startswith("🧹 자막 정리:") and not self.clean_summary:
             self.clean_summary = line.split(":", 1)[1].strip()
         if not (0 <= self.step_index < len(self.steps)):
@@ -1307,6 +1294,12 @@ class MainWindow(QMainWindow):
             summary.setObjectName("hint")
             summary.setWordWrap(True)
             self.result_body.addWidget(summary)
+
+        if self.ollama_skipped:
+            warning = QLabel(f"⚠  {self.ollama_skipped.lstrip('⚠').strip()}")
+            warning.setObjectName("warning")
+            warning.setWordWrap(True)
+            self.result_body.addWidget(warning)
 
         if self.batch_errors:
             warning = QLabel(f"⚠  일부 구간({self.batch_errors}개 묶음)은 번역에 실패해 원문이 유지되었습니다.")
