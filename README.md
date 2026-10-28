@@ -58,8 +58,19 @@ mlx-qwen3-asr의 기본 SRT 출력은 **문장부호가 모두 빠지고 10단�
 | 엔진 | 방식 | 속도 | 특징 |
 |------|------|------|------|
 | 로컬 NLLB | 자막 하나를 한 문장으로 묶어 32개씩 GPU에서 일괄 번역, 같은 문장은 한 번만 번역 | 가장 빠름 | 오프라인. 앞뒤 문맥은 보지 않음. `1.3B` 모델로 품질 향상 가능 |
+| NLLB + 교정 | NLLB로 전체를 번역한 뒤, 어색한 줄만 Ollama가 초안과 앞뒤 문맥을 보고 고침 | NLLB에 가까움 | 일본어 잔존, 용어집 불일치, 과하게 짧은 번역, 짧은 문장 단절만 교정. 나머지는 NLLB 초안 유지 |
 | 구글 번역 | 자막 단위로 묶어 요청 | 빠름 | 인터넷 필요, 무료 웹은 일시 차단될 수 있음 |
 | Ollama (qwen3:8b) | **문맥 번역**: 번역할 20줄 + 직전 6줄의 원문·번역 + 다음 3줄을 함께 전달, 번호별 JSON으로 받아 검증 | 느림 | 생략된 주어·이어지는 문장·말투(반말/존댓말)를 살려 가장 자연스러움. 용어집 지원 |
+
+**NLLB + 교정**(`--engine hybrid`, GUI의 `NLLB+교정`)은 전체를 Ollama에 맡기지 않습니다. NLLB가 모든 자막을 번역한 뒤, 아래 중 하나에 해당하는 줄만 Ollama가 초안과 앞뒤 자막을 보고 다시 씁니다.
+
+- 번역문에 일본어·영어가 남은 줄
+- 용어집의 번역과 다른 줄
+- 원문에 비해 지나치게 짧은 줄
+- 같은 말이 반복되거나, 조사로 끝나 문장이 끊긴 줄
+- 앞 자막과 이어지는 짧은 조각
+
+교정에 실패하면 그 줄은 NLLB 초안을 유지합니다. 문제 없는 줄은 Ollama를 호출하지 않으므로, 대부분의 자막은 NLLB 속도로 끝나고 어색한 줄만 문맥 교정을 받습니다. Ollama 앱이 실행 중이어야 합니다.
 
 Ollama 문맥 번역의 안정성 장치:
 
@@ -94,7 +105,7 @@ cd translate_prod
    - 파일은 복사하지 않고 경로만 사용하므로 수 GB짜리 동영상도 바로 처리됩니다.
 3. **옵션**을 확인합니다.
    - 원본 언어 (음성 인식 언어 고정과 번역에 모두 사용), 음성 인식 모델 (기본: 1.7B 8bit), 자막 저장 폴더
-   - 번역 엔진: NLLB를 고르면 **NLLB 모델**(600M 빠름 / 1.3B 고품질), Ollama를 고르면 **용어집** 파일, 구글을 고르면 API 키(선택) 항목이 나타납니다.
+   - 번역 엔진: NLLB와 NLLB+교정을 고르면 **NLLB 모델**(600M 빠름 / 1.3B 고품질), Ollama와 NLLB+교정을 고르면 **용어집** 파일, 구글을 고르면 API 키(선택) 항목이 나타납니다.
    - **자막 정리** (기본 켜짐): 반복·잡음 제거, 짧은 조각 병합
 4. **시작**을 누르면 `자막 추출 › 자막 정리 › 번역` 단계별 진행률과 남은 시간이 하단에 표시됩니다.
 5. 완료되면 결과 파일을 바로 열거나 Finder에서 확인할 수 있고, 자막 정리 결과(제거·병합된 자막 수)도 함께 표시됩니다. `자막만 생성` 후에는 **이 자막으로 번역하기** 버튼으로 이어서 번역할 수 있습니다.
@@ -146,18 +157,20 @@ cd translate_prod
 - `[1]` 로컬 NLLB: 오프라인으로 동작하며 가장 빠릅니다.
 - `[2]` 구글 번역: 인터넷 연결이 필요합니다.
 - `[3]` 로컬 Ollama(qwen3): 앞뒤 문맥을 보고 번역해 가장 자연스럽습니다. Ollama 설치가 필요합니다.
+- `[4]` NLLB 초안 + 교정: 전체를 NLLB로 번역한 뒤 어색한 줄만 Ollama가 고칩니다. Ollama 설치가 필요합니다.
 
 ### 3단계: 원본 언어 선택
 
 마지막으로 원본 언어를 고릅니다(Enter를 누르면 일본어). 선택한 언어는 **음성 인식 언어 고정**과 **번역 원문 언어** 모두에 사용됩니다.
 
-- `[1]` 일본어 / `[2]` 영어 / `[3]` 자동 감지 (NLLB 번역에서는 원본 언어를 직접 지정해야 하므로 표시되지 않음)
+- `[1]` 일본어 / `[2]` 영어 / `[3]` 자동 감지 (NLLB와 NLLB+교정은 원본 언어를 직접 지정해야 하므로 표시되지 않음)
 
 ### 메뉴 없이 바로 실행
 
 모드·엔진·언어를 옵션으로 지정하면 해당 메뉴를 건너뜁니다.
 
 ```bash
+./run.sh 파일명.mp4 --mode full --engine hybrid --lang ja     # NLLB 초안 + 어색한 줄만 교정
 ./run.sh 파일명.mp4 --mode full --engine ollama --lang ja     # 자막 + 문맥 번역
 ./run.sh 파일명.mp4 --mode stt --lang ja                      # 자막만
 ./run.sh result/파일명.srt --mode translate --engine nllb -l ja # 번역 자막만
@@ -167,7 +180,7 @@ cd translate_prod
 | 옵션 | 값 |
 |------|----|
 | `--mode`, `-m` | `full` (자막+번역) / `stt` (자막만) / `translate` (번역 자막만) |
-| `--engine`, `-e` | `nllb` / `google` / `ollama` |
+| `--engine`, `-e` | `nllb` / `google` / `ollama` / `hybrid` |
 | `--lang`, `-l` | `ja` / `en` / `auto` (음성 인식 언어 고정 + 번역 원문 언어) |
 | `--no-clean` | 자막 정리(반복·잡음 제거, 조각 병합) 끄기 |
 | `--setup`, `-s` | venv 생성 및 패키지 재설치 |
@@ -252,6 +265,7 @@ translate_prod/
 ├── import_srt.py           # NLLB 로컬 번역 (일괄 번역)
 ├── google_translate_srt.py # 구글 번역 (무료 웹 / 공식 API)
 ├── translate_srt.py        # Ollama(qwen3) 문맥 번역 + 용어집
+├── hybrid_translate_srt.py # NLLB 초안 + 어색한 줄만 Ollama 교정
 ├── glossary.example.txt    # 용어집 예시 (glossary.txt로 복사해 사용, git 제외)
 ├── requirements.txt
 ├── docs/gui.png            # README용 GUI 화면
@@ -266,7 +280,7 @@ translate_prod/
 | `ASR_MODEL` | `mlx-community/Qwen3-ASR-1.7B-8bit` | STT 모델 (`Qwen/Qwen3-ASR-1.7B`: 원본, `Qwen/Qwen3-ASR-0.6B`: 경량) |
 | `OUTPUT_DIR` | `./result` | 자막 출력 폴더 |
 | `RUN_MODE` | (선택 메뉴) | 실행 모드 기본값: `full` / `stt` / `translate` |
-| `TRANSLATE_ENGINE` | (선택 메뉴) | 번역 엔진 기본값: `nllb` / `google` / `ollama` |
+| `TRANSLATE_ENGINE` | (선택 메뉴) | 번역 엔진 기본값: `nllb` / `google` / `ollama` / `hybrid` |
 | `SRC_LANG` | (선택 메뉴) | 원본 언어: `ja` / `en` / `auto` |
 | `CLEAN` | `1` | `0`이면 자막 정리 생략 (`--no-clean`과 동일) |
 | `NLLB_MODEL` | `600m` | NLLB 모델: `600m` / `1.3b` / Hugging Face 모델 ID |
@@ -297,6 +311,7 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
    - [x] 문장 단위 자막 재구성 + 반복·잡음 제거 (`srt_cleanup.py`)
    - [x] Ollama 문맥 번역 (앞뒤 자막 참고, JSON 검증, 용어집)
    - [x] NLLB 일괄 번역(FP16) + 1.3B 모델 선택, STT 8bit 모델 기본 적용
+   - [x] NLLB 초안 후 어색한 줄만 Ollama 교정 (`hybrid`)
    - [ ] 화자 구분(`--diarize`)을 번역 문맥에 반영
    - [ ] 번역 중단 시 이어서 번역 (체크포인트)
 

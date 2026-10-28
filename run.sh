@@ -22,7 +22,7 @@ DO_SETUP=0
 INPUT=""
 
 usage() {
-  echo "Usage: ./run.sh [file] [--mode full|stt|translate] [--engine nllb|google|ollama] [--lang ja|en|auto] [--no-clean] [--setup]"
+  echo "Usage: ./run.sh [file] [--mode full|stt|translate] [--engine nllb|google|ollama|hybrid] [--lang ja|en|auto] [--no-clean] [--setup]"
   echo "  file            동영상 경로 (translate 모드는 .srt 경로). 생략 시 입력 요청"
   echo "  --mode, -m      실행 모드 (생략 시 선택 메뉴 표시)"
   echo "                    full      : 동영상 → 자막 → 번역 자막 (한 번에)"
@@ -32,6 +32,7 @@ usage() {
   echo "                    nllb   : 로컬 NLLB 모델 (오프라인, 빠름)"
   echo "                    google : 구글 번역 (GOOGLE_API_KEY 있으면 공식 API, 없으면 무료 웹)"
   echo "                    ollama : 로컬 Ollama qwen3 (앞뒤 문맥을 보고 번역, 품질 우선)"
+  echo "                    hybrid : NLLB 초안 후 어색한 줄만 Ollama로 교정"
   echo "  --lang, -l      원본 언어 ja | en | auto (생략 시 선택 메뉴). 음성 인식과 번역에 모두 사용"
   echo "  --no-clean      자막 정리(반복·잡음 제거, 조각 병합) 끄기"
   echo "  --setup, -s     venv 생성 및 requirements 설치"
@@ -158,12 +159,14 @@ if [[ "$MODE" != "stt" ]]; then
     echo " [1] 로컬 NLLB (오프라인, 기본값)"
     echo " [2] 구글 번역"
     echo " [3] 로컬 Ollama (qwen3)"
+    echo " [4] NLLB 초안 + 어색한 줄만 Ollama 교정"
     echo "========================================"
     read -r -p "👉 선택 (Enter = 1): " ENGINE_CHOICE
     case "${ENGINE_CHOICE:-1}" in
       1) ENGINE="nllb" ;;
       2) ENGINE="google" ;;
       3) ENGINE="ollama" ;;
+      4) ENGINE="hybrid" ;;
       *)
         echo "잘못된 선택입니다: $ENGINE_CHOICE" >&2
         exit 1
@@ -173,9 +176,9 @@ if [[ "$MODE" != "stt" ]]; then
 
   ENGINE="$(echo "$ENGINE" | tr '[:upper:]' '[:lower:]')"
   case "$ENGINE" in
-    nllb|google|ollama) ;;
+    nllb|google|ollama|hybrid) ;;
     *)
-      echo "지원하지 않는 번역 엔진: $ENGINE (nllb | google | ollama)" >&2
+      echo "지원하지 않는 번역 엔진: $ENGINE (nllb | google | ollama | hybrid)" >&2
       exit 1
       ;;
   esac
@@ -183,7 +186,7 @@ fi
 
 # --- 원본 언어 (음성 인식 언어 고정 + 번역 원문 언어) ---
 ALLOW_AUTO=1
-if [[ "$MODE" != "stt" && "$ENGINE" == "nllb" ]]; then
+if [[ "$MODE" != "stt" && ( "$ENGINE" == "nllb" || "$ENGINE" == "hybrid" ) ]]; then
   ALLOW_AUTO=0
 fi
 if [[ -z "$SRC_LANG" ]]; then
@@ -211,7 +214,7 @@ case "$SRC_LANG" in
   ja|en) ;;
   auto)
     if [[ "$ALLOW_AUTO" == "0" ]]; then
-      echo "NLLB 번역은 원본 언어를 직접 지정해야 합니다 (--lang ja | en)." >&2
+      echo "NLLB가 포함된 번역은 원본 언어를 직접 지정해야 합니다 (--lang ja | en)." >&2
       exit 1
     fi
     ;;
@@ -294,6 +297,7 @@ run_translate() {
     nllb)   label="로컬 NLLB" ;;
     google) label="구글 번역" ;;
     ollama) label="로컬 Ollama" ;;
+    hybrid) label="NLLB 초안 + Ollama 교정" ;;
   esac
 
   echo ""
@@ -307,6 +311,7 @@ run_translate() {
     nllb)   script="import_srt.py" ;;
     google) script="google_translate_srt.py" ;;
     ollama) script="translate_srt.py" ;;
+    hybrid) script="hybrid_translate_srt.py" ;;
   esac
   "$PY" "$ROOT/$script" --input "$src" --output "$KOR_FILE" --lang "$SRC_LANG" \
     ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}

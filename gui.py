@@ -61,12 +61,15 @@ MODES = [
 ]
 ENGINES = [
     ("nllb", "로컬 NLLB", "오프라인 · 빠름"),
+    ("hybrid", "NLLB+교정", "초안 후 어색한 줄만"),
     ("google", "구글 번역", "인터넷 필요"),
     ("ollama", "Ollama", "로컬 LLM · 문맥 번역"),
 ]
 ENGINE_LABELS = {key: title for key, title, _ in ENGINES}
 ENGINE_HINTS = {
     "nllb": "facebook/nllb-200 모델로 자막을 문장 단위로 묶어 한꺼번에 번역합니다. 인터넷 없이 동작합니다.",
+    "hybrid": "NLLB로 전체를 번역한 뒤, 일본어가 남거나 용어가 어긋나거나 짧게 끊긴 줄만 Ollama가 고칩니다. "
+    "Ollama 앱이 실행 중이어야 합니다.",
     "google": "API 키가 없으면 무료 웹 번역을 사용합니다(요청이 많으면 일시 차단될 수 있음).",
     "ollama": "Ollama의 qwen3:8b가 앞뒤 자막과 용어집을 참고해 번역합니다. 가장 자연스럽지만 느립니다. "
     "Ollama 앱이 실행 중이어야 합니다.",
@@ -909,11 +912,11 @@ class MainWindow(QMainWindow):
         self.row_out.setVisible(needs_stt)
         self.row_engine.setVisible(needs_tr)
         self.row_key.setVisible(needs_tr and engine == "google")
-        self.row_nllb.setVisible(needs_tr and engine == "nllb")
-        self.row_gloss.setVisible(needs_tr and engine == "ollama")
+        self.row_nllb.setVisible(needs_tr and engine in ("nllb", "hybrid"))
+        self.row_gloss.setVisible(needs_tr and engine in ("ollama", "hybrid"))
         self.engine_hint.setText(ENGINE_HINTS[engine])
 
-        allow_auto = not (needs_tr and engine == "nllb")
+        allow_auto = not (needs_tr and engine in ("nllb", "hybrid"))
         current = self.lang_combo.currentData() or getattr(self, "_saved_lang", "ja")
         self.lang_combo.blockSignals(True)
         self.lang_combo.clear()
@@ -923,7 +926,7 @@ class MainWindow(QMainWindow):
         self.lang_combo.setCurrentIndex(idx if idx >= 0 else self.lang_combo.findData("ja"))
         self.lang_combo.blockSignals(False)
 
-        if needs_tr and engine == "nllb":
+        if needs_tr and engine in ("nllb", "hybrid"):
             self.lang_hint.setText("NLLB 번역은 원본 언어를 직접 지정해야 합니다.")
         elif needs_stt:
             self.lang_hint.setText("음성 인식에도 사용됩니다. 직접 지정하면 더 정확합니다.")
@@ -979,7 +982,7 @@ class MainWindow(QMainWindow):
         needs_stt = mode in ("full", "stt")
         needs_tr = mode in ("full", "translate")
 
-        if needs_tr and engine == "ollama" and not ollama_running():
+        if needs_tr and engine in ("ollama", "hybrid") and not ollama_running():
             QMessageBox.warning(
                 self,
                 "Ollama가 실행 중이 아닙니다",
@@ -1083,6 +1086,7 @@ class MainWindow(QMainWindow):
             "nllb": "import_srt.py",
             "google": "google_translate_srt.py",
             "ollama": "translate_srt.py",
+            "hybrid": "hybrid_translate_srt.py",
         }[self.run_engine]
         args = [
             str(ROOT / script),
@@ -1092,7 +1096,9 @@ class MainWindow(QMainWindow):
         ]
         if self.run_engine == "nllb":
             args += ["--model", self.run_nllb]
-        if self.run_engine == "ollama" and self.run_glossary:
+        if self.run_engine == "hybrid":
+            args += ["--nllb-model", self.run_nllb]
+        if self.run_engine in ("ollama", "hybrid") and self.run_glossary:
             args += ["--glossary", self.run_glossary]
         if not self.run_clean:
             args.append("--no-clean")

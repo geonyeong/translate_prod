@@ -77,9 +77,9 @@ def load_glossary(path: str | None) -> dict[str, str]:
     return glossary
 
 
-def system_prompt(lang: str) -> str:
+def system_prompt(lang: str, revise: bool = False) -> str:
     name = LANG_NAMES[lang]
-    return (
+    prompt = (
         f"You are a professional subtitle translator. Translate {name} subtitles into natural, "
         "colloquial Korean that fits spoken dialogue.\n"
         "Rules:\n"
@@ -92,8 +92,15 @@ def system_prompt(lang: str) -> str:
         "ください, 必要があります, and write names in Hangul.\n"
         "- If a line is only an interjection or a sound, render it as a short Korean interjection.\n"
         "- Follow the glossary exactly when a term appears.\n"
-        'Reply with JSON only: {"1": "번역", "2": "번역", ...} using exactly the line numbers in [TRANSLATE].'
     )
+    if revise:
+        prompt += (
+            "- Each line includes a machine draft plus before/after context. Correct the draft against the source.\n"
+            "- Keep the draft when it is already accurate and natural.\n"
+            "- Restore dropped subjects, fix names, and remove leftover source-language text.\n"
+        )
+    prompt += 'Reply with JSON only: {"1": "번역", "2": "번역", ...} using exactly the line numbers in [TRANSLATE].'
+    return prompt
 
 
 def build_user_prompt(
@@ -101,6 +108,7 @@ def build_user_prompt(
     before: list[tuple[str, str]],
     after: list[str],
     glossary: dict[str, str],
+    notes: list[str] | None = None,
 ) -> str:
     parts: list[str] = []
     joined = "\n".join(batch)
@@ -109,7 +117,14 @@ def build_user_prompt(
         parts.append("[GLOSSARY]\n" + "\n".join(f"{src} = {dst}" for src, dst in terms.items()))
     if before:
         parts.append("[PREVIOUS]\n" + "\n".join(f"{src}  =>  {dst}" for src, dst in before))
-    parts.append("[TRANSLATE]\n" + "\n".join(f"{i}: {text}" for i, text in enumerate(batch, 1)))
+    lines = []
+    for i, text in enumerate(batch, 1):
+        line = f"{i}: {text}"
+        note = notes[i - 1].strip() if notes else ""
+        if note:
+            line += "\n" + note
+        lines.append(line)
+    parts.append("[TRANSLATE]\n" + "\n".join(lines))
     if after:
         parts.append("[NEXT]\n" + "\n".join(after))
     return "\n\n".join(parts)
@@ -174,18 +189,22 @@ def request_batch(
     glossary: dict[str, str],
     strict: bool = True,
     temperature: float = 0.2,
+    notes: list[str] | None = None,
+    revise: bool = False,
 ) -> list[str | None]:
     """Translate one batch; returns None for lines the model failed to translate.
 
     strict: also reject lines that still contain kana (left untranslated).
+    notes: optional per-line context (draft, neighbors) shown under each source line.
+    revise: correct a machine draft instead of translating from scratch.
     """
+    messages: list[dict] = [{"role": "system", "content": system_prompt(lang, revise=revise)}]
+    if not revise:
+        messages.extend(few_shot_messages(lang))
+    messages.append({"role": "user", "content": build_user_prompt(batch, before, after, glossary, notes)})
     response = ollama.chat(
         model=model,
-        messages=[
-            {"role": "system", "content": system_prompt(lang)},
-            *few_shot_messages(lang),
-            {"role": "user", "content": build_user_prompt(batch, before, after, glossary)},
-        ],
+        messages=messages,
         format=response_schema(len(batch)),
         think=False,
         options={"temperature": temperature, "num_ctx": 8192},
