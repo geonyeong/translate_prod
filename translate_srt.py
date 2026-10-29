@@ -15,6 +15,7 @@ import re
 import sys
 from pathlib import Path
 
+import httpx
 import ollama
 
 from ollama_boot import ensure_ollama
@@ -192,23 +193,27 @@ def request_batch(
     temperature: float = 0.2,
     notes: list[str] | None = None,
     revise: bool = False,
+    num_ctx: int = 8192,
+    timeout: float | None = None,
 ) -> list[str | None]:
     """Translate one batch; returns None for lines the model failed to translate.
 
     strict: also reject lines that still contain kana (left untranslated).
     notes: optional per-line context (draft, neighbors) shown under each source line.
     revise: correct a machine draft instead of translating from scratch.
+    timeout: abort the HTTP call after this many seconds. Raises httpx.TimeoutException.
     """
     messages: list[dict] = [{"role": "system", "content": system_prompt(lang, revise=revise)}]
     if not revise:
         messages.extend(few_shot_messages(lang))
     messages.append({"role": "user", "content": build_user_prompt(batch, before, after, glossary, notes)})
-    response = ollama.chat(
+    client = ollama.Client(timeout=timeout) if timeout else ollama
+    response = client.chat(
         model=model,
         messages=messages,
         format=response_schema(len(batch)),
         think=False,
-        options={"temperature": temperature, "num_ctx": 8192},
+        options={"temperature": temperature, "num_ctx": num_ctx},
         # Unload soon after the run: a resident 5GB model makes the next STT run ~3x slower on 16GB Macs.
         keep_alive="1m",
     )
