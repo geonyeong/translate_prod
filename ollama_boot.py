@@ -66,3 +66,23 @@ def ensure_ollama(timeout: float = 25) -> bool:
     else:
         print("⚠️ Ollama 앱과 'ollama' 명령을 찾지 못했습니다.", flush=True)
     return False
+
+
+def unload_model(model: str) -> None:
+    """Drop a resident Ollama model so the next STT run is not starved of RAM."""
+    if not model or not ollama_running():
+        return
+    binary = shutil.which("ollama")
+    if binary is None:
+        return
+    result = subprocess.run(
+        [binary, "stop", model],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"✓ Ollama 모델 해제: {model}", flush=True)
+    else:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            print(f"⚠️ Ollama 모델 해제 실패 ({model}): {detail}", flush=True)

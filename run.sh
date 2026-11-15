@@ -6,6 +6,7 @@
 #   ./run.sh video.mp4 --mode full --engine ollama --lang ja
 #   ./run.sh video.mp4 --mode stt
 #   ./run.sh result/video.srt --mode translate --engine nllb
+#   ./run.sh result/video.asr.json --mode reclean --lang ja
 #   ./run.sh video.mp4 --setup                 # also (re)install packages
 set -euo pipefail
 
@@ -18,22 +19,25 @@ ENGINE="${TRANSLATE_ENGINE:-}"
 MODE="${RUN_MODE:-}"
 SRC_LANG="${SRC_LANG:-}"
 CLEAN="${CLEAN:-1}"
+RESUME_DRAFT=""
 DO_SETUP=0
 INPUT=""
 
 usage() {
-  echo "Usage: ./run.sh [file] [--mode full|stt|translate] [--engine nllb|google|ollama|hybrid] [--lang ja|en|auto] [--no-clean] [--setup]"
-  echo "  file            동영상 경로 (translate 모드는 .srt 경로). 생략 시 입력 요청"
+  echo "Usage: ./run.sh [file] [--mode full|stt|translate|reclean] [--engine nllb|google|ollama|hybrid] [--lang ja|en|auto] [--resume-draft PATH] [--no-clean] [--setup]"
+  echo "  file            동영상 경로 (translate=.srt, reclean=.asr.json). 생략 시 입력 요청"
   echo "  --mode, -m      실행 모드 (생략 시 선택 메뉴 표시)"
   echo "                    full      : 동영상 → 자막 → 번역 자막 (한 번에)"
   echo "                    stt       : 동영상 → 자막만 생성"
   echo "                    translate : 기존 자막(.srt) → 번역 자막만 생성"
-  echo "  --engine, -e    번역 엔진 (생략 시 선택 메뉴 표시, stt 모드에서는 무시)"
+  echo "                    reclean   : 저장된 .asr.json → 자막만 다시 정리"
+  echo "  --engine, -e    번역 엔진 (생략 시 선택 메뉴 표시, stt/reclean 모드에서는 무시)"
   echo "                    nllb   : 로컬 NLLB 모델 (오프라인, 빠름)"
   echo "                    google : 구글 번역 (GOOGLE_API_KEY 있으면 공식 API, 없으면 무료 웹)"
   echo "                    ollama : 로컬 Ollama qwen3 (앞뒤 문맥을 보고 번역, 품질 우선)"
   echo "                    hybrid : NLLB 초안 후 어색한 줄만 Ollama로 교정"
   echo "  --lang, -l      원본 언어 ja | en | auto (생략 시 선택 메뉴). 음성 인식과 번역에 모두 사용"
+  echo "  --resume-draft  hybrid 초안 JSON만 교정 (NLLB 생략)"
   echo "  --no-clean      자막 정리(반복·잡음 제거, 조각 병합) 끄기"
   echo "  --setup, -s     venv 생성 및 requirements 설치"
 }
@@ -67,6 +71,12 @@ while [[ $# -gt 0 ]]; do
       ;;
     --lang=*) SRC_LANG="${1#*=}" ;;
     --no-clean) CLEAN=0 ;;
+    --resume-draft)
+      require_value "$@"
+      RESUME_DRAFT="$2"
+      shift
+      ;;
+    --resume-draft=*) RESUME_DRAFT="${1#*=}" ;;
     -h|--help)
       usage
       exit 0
@@ -94,23 +104,33 @@ is_srt() {
   [[ "$lower" == *.srt ]]
 }
 
+is_asr_json() {
+  local lower
+  lower="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+  [[ "$lower" == *.asr.json || "$lower" == *.json ]]
+}
+
 # --- 실행 모드 ---
 if [[ -z "$MODE" ]]; then
   DEFAULT_MODE=1
   if [[ -n "$INPUT" ]] && is_srt "$INPUT"; then
     DEFAULT_MODE=3
+  elif [[ -n "$INPUT" ]] && is_asr_json "$INPUT"; then
+    DEFAULT_MODE=4
   fi
   echo "========================================"
   echo " 실행 모드를 선택하세요."
   echo " [1] 자막과 번역 한 번에 (동영상 → 자막 → 번역 자막)"
   echo " [2] 자막만 생성 (동영상 → 자막)"
   echo " [3] 자막으로 번역 자막만 생성 (.srt → 번역 자막)"
+  echo " [4] 저장된 음성 인식 JSON으로 자막만 다시 정리 (.asr.json → 자막)"
   echo "========================================"
   read -r -p "👉 선택 (Enter = $DEFAULT_MODE): " MODE_CHOICE
   case "${MODE_CHOICE:-$DEFAULT_MODE}" in
     1) MODE="full" ;;
     2) MODE="stt" ;;
     3) MODE="translate" ;;
+    4) MODE="reclean" ;;
     *)
       echo "잘못된 선택입니다: $MODE_CHOICE" >&2
       exit 1
@@ -120,9 +140,9 @@ fi
 
 MODE="$(echo "$MODE" | tr '[:upper:]' '[:lower:]')"
 case "$MODE" in
-  full|stt|translate) ;;
+  full|stt|translate|reclean) ;;
   *)
-    echo "지원하지 않는 실행 모드: $MODE (full | stt | translate)" >&2
+    echo "지원하지 않는 실행 모드: $MODE (full | stt | translate | reclean)" >&2
     exit 1
     ;;
 esac
@@ -131,6 +151,8 @@ esac
 if [[ -z "$INPUT" ]]; then
   if [[ "$MODE" == "translate" ]]; then
     read -r -p "번역할 자막 파일(.srt) 경로를 입력하세요: " INPUT
+  elif [[ "$MODE" == "reclean" ]]; then
+    read -r -p "음성 인식 결과(.asr.json) 경로를 입력하세요: " INPUT
   else
     read -r -p "동영상 파일명(또는 경로)을 입력하세요: " INPUT
   fi
@@ -146,13 +168,24 @@ if [[ "$MODE" == "translate" ]] && ! is_srt "$INPUT"; then
   echo "오류: 번역 자막만 생성 모드는 .srt 파일이 필요합니다 → $INPUT" >&2
   exit 1
 fi
-if [[ "$MODE" != "translate" ]] && is_srt "$INPUT"; then
+if [[ "$MODE" == "reclean" ]] && ! is_asr_json "$INPUT"; then
+  echo "오류: 재정리 모드는 .asr.json(또는 .json) 파일이 필요합니다 → $INPUT" >&2
+  exit 1
+fi
+if [[ "$MODE" != "translate" && "$MODE" != "reclean" ]] && is_srt "$INPUT"; then
   echo "오류: 자막 파일이 입력되었습니다. 기존 자막을 번역하려면 [3] (--mode translate)을 선택하세요." >&2
   exit 1
 fi
+if [[ -n "$RESUME_DRAFT" && "$MODE" != "translate" ]]; then
+  echo "오류: --resume-draft 는 translate 모드에서만 사용할 수 있습니다." >&2
+  exit 1
+fi
+if [[ -n "$RESUME_DRAFT" ]]; then
+  ENGINE="${ENGINE:-hybrid}"
+fi
 
 # --- 번역 엔진 (번역이 포함된 모드만) ---
-if [[ "$MODE" != "stt" ]]; then
+if [[ "$MODE" != "stt" && "$MODE" != "reclean" ]]; then
   if [[ -z "$ENGINE" ]]; then
     echo "========================================"
     echo " 번역 엔진을 선택하세요."
@@ -186,7 +219,7 @@ fi
 
 # --- 원본 언어 (음성 인식 언어 고정 + 번역 원문 언어) ---
 ALLOW_AUTO=1
-if [[ "$MODE" != "stt" && ( "$ENGINE" == "nllb" || "$ENGINE" == "hybrid" ) ]]; then
+if [[ "$MODE" != "stt" && "$MODE" != "reclean" && ( "$ENGINE" == "nllb" || "$ENGINE" == "hybrid" ) ]]; then
   ALLOW_AUTO=0
 fi
 if [[ -z "$SRC_LANG" ]]; then
@@ -279,9 +312,36 @@ run_stt() {
     echo "오류: 음성 인식 결과가 생성되지 않았습니다." >&2
     exit 1
   fi
-  "$PY" "$ROOT/srt_cleanup.py" --input "$json_file" --output "$SRT_FILE" --lang "$SRC_LANG" \
+  ASR_JSON="$OUTPUT_DIR/${stem}.asr.json"
+  cp "$json_file" "$ASR_JSON"
+  echo "음성 인식 JSON 저장: $ASR_JSON"
+  "$PY" "$ROOT/srt_cleanup.py" --input "$ASR_JSON" --output "$SRT_FILE" --lang "$SRC_LANG" \
     ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}
   rm -rf "$tmp_dir"
+}
+
+# --- 1b) 저장된 ASR JSON → 자막 ---
+run_reclean() {
+  mkdir -p "$OUTPUT_DIR"
+  local stem dir
+  dir="$(dirname "$INPUT")"
+  stem="$(basename "$INPUT")"
+  stem="${stem%.asr.json}"
+  stem="${stem%.json}"
+  stem="${stem%.ASR.JSON}"
+  if [[ "$dir" == "." ]]; then
+    dir="$OUTPUT_DIR"
+  fi
+  ASR_JSON="$INPUT"
+  SRT_FILE="$dir/${stem}.srt"
+  echo ""
+  echo "========================================"
+  echo " 자막 재정리 (저장된 ASR JSON)"
+  echo "    입력: $ASR_JSON"
+  echo "    출력: $SRT_FILE"
+  echo "========================================"
+  "$PY" "$ROOT/srt_cleanup.py" --input "$ASR_JSON" --output "$SRT_FILE" --lang "$SRC_LANG" \
+    ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}
 }
 
 # --- 2) 번역 ---
@@ -305,16 +365,32 @@ run_translate() {
   echo " 번역 ($label → 한국어)"
   echo "    입력: $src"
   echo "    출력: $KOR_FILE"
+  if [[ -n "$RESUME_DRAFT" ]]; then
+    echo "    초안: $RESUME_DRAFT"
+  fi
   echo "========================================"
-  local script
+  local script extra=()
   case "$ENGINE" in
     nllb)   script="import_srt.py" ;;
     google) script="google_translate_srt.py" ;;
     ollama) script="translate_srt.py" ;;
     hybrid) script="hybrid_translate_srt.py" ;;
   esac
+  if [[ -n "$RESUME_DRAFT" ]]; then
+    if [[ "$ENGINE" != "hybrid" ]]; then
+      echo "오류: --resume-draft 는 hybrid 엔진에서만 사용할 수 있습니다." >&2
+      exit 1
+    fi
+    RESUME_DRAFT="${RESUME_DRAFT/#\~/$HOME}"
+    if [[ ! -f "$RESUME_DRAFT" ]]; then
+      echo "오류: 초안 파일을 찾을 수 없습니다 → $RESUME_DRAFT" >&2
+      exit 1
+    fi
+    extra+=(--resume-draft "$RESUME_DRAFT")
+  fi
   "$PY" "$ROOT/$script" --input "$src" --output "$KOR_FILE" --lang "$SRC_LANG" \
-    ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"}
+    ${CLEAN_ARGS[@]+"${CLEAN_ARGS[@]}"} \
+    ${extra[@]+"${extra[@]}"}
 }
 
 case "$MODE" in
@@ -323,11 +399,19 @@ case "$MODE" in
     run_translate "$SRT_FILE"
     echo ""
     echo "완료!"
+    echo "  음성 인식 JSON: $ASR_JSON"
     echo "  원본 자막: $SRT_FILE"
     echo "  한글 자막: $KOR_FILE"
     ;;
   stt)
     run_stt
+    echo ""
+    echo "완료!"
+    echo "  음성 인식 JSON: $ASR_JSON"
+    echo "  원본 자막: $SRT_FILE"
+    ;;
+  reclean)
+    run_reclean
     echo ""
     echo "완료!"
     echo "  원본 자막: $SRT_FILE"

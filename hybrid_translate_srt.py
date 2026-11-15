@@ -16,12 +16,12 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from collections import Counter
+from pathlib import Path
 
 import httpx
 
-from ollama_boot import ensure_ollama
+from ollama_boot import ensure_ollama, unload_model
 from srt_cleanup import Cue, ends_sentence, prepare_for_translation, save_cues, wrap_lines
 from translate_srt import (
     DEFAULT_GLOSSARY,
@@ -76,9 +76,20 @@ def parse_args() -> argparse.Namespace:
         help=f"Glossary file ('원문 = 번역' per line). Default: {DEFAULT_GLOSSARY.name} if it exists",
     )
     parser.add_argument("--no-clean", action="store_true", help="Skip subtitle cleanup before translating")
+    parser.add_argument(
+        "--resume-draft",
+        help="Polish an existing NLLB draft JSON and skip drafting (keeps the file until polish succeeds)",
+    )
     parser.add_argument("--draft-file", help=argparse.SUPPRESS)
     parser.add_argument("--write-draft", help=argparse.SUPPRESS)
     return parser.parse_args()
+
+
+def draft_path_for(output: str, source: str | None = None) -> str:
+    """Sidecar next to the Korean SRT: {stem}_hybrid_draft.json."""
+    out = Path(output)
+    stem = Path(source).stem if source else out.stem.removesuffix("_KOR")
+    return str(out.with_name(f"{stem}_hybrid_draft.json"))
 
 
 def core_len(text: str) -> int:
@@ -283,15 +294,17 @@ def main() -> None:
             sys.exit(1)
         write_draft_file(args, args.write_draft)
         return
-    if args.draft_file:
+    if args.draft_file or args.resume_draft:
+        args.draft_file = args.draft_file or args.resume_draft
         polish_saved_draft(args)
         return
     if not args.input or not os.path.exists(args.input):
         print(f"❌ 오류: 파일 '{args.input}'이 없습니다. 경로를 확인해주세요.")
         sys.exit(1)
 
-    fd, path = tempfile.mkstemp(prefix="hybrid_draft_", suffix=".json")
-    os.close(fd)
+    path = draft_path_for(args.output, args.input)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    print(f"💾 NLLB 초안 체크포인트: {path}", flush=True)
     command = [
         sys.executable,
         os.path.abspath(__file__),
@@ -312,22 +325,25 @@ def main() -> None:
         command.append("--no-clean")
     completed = subprocess.run(command)
     if completed.returncode != 0:
-        if os.path.exists(path):
-            os.remove(path)
+        print(f"⚠️ NLLB 초안이 실패했습니다. 체크포인트가 남아 있으면 다시 시도하세요: {path}", flush=True)
         sys.exit(completed.returncode)
     args.draft_file = path
     polish_saved_draft(args)
 
 
 def polish_saved_draft(args: argparse.Namespace) -> None:
-    with open(args.draft_file, encoding="utf-8") as handle:
+    draft_path = args.draft_file
+    if not draft_path or not os.path.exists(draft_path):
+        print(f"❌ 오류: 초안 파일 '{draft_path}'을 찾을 수 없습니다.")
+        sys.exit(1)
+    with open(draft_path, encoding="utf-8") as handle:
         payload = json.load(handle)
-    os.remove(args.draft_file)
     lang_code = payload["lang"]
     cues = [Cue(item["start"], item["end"], item["text"]) for item in payload["cues"]]
     texts = [cue.text for cue in cues]
     drafts = list(payload["drafts"])
     glossary = load_glossary(args.glossary)
+    used_ollama = False
 
     flagged: list[int] = []
     counts: Counter[str] = Counter()
@@ -338,13 +354,16 @@ def polish_saved_draft(args: argparse.Namespace) -> None:
             counts.update(reasons)
 
     print()
+    keep_draft = False
     if not flagged:
         print(f"✨ 교정할 줄이 없습니다. NLLB 초안 {len(texts)}줄을 그대로 저장합니다.")
         polished, failed = drafts, 0
     elif not _ollama_ready(args.model):
         print("⚠️ 교정을 건너뛰고 NLLB 초안을 저장합니다.")
         polished, failed = drafts, 0
+        keep_draft = True
     else:
+        used_ollama = True
         detail = ", ".join(f"{name} {count}" for name, count in counts.most_common())
         print(f"🔧 교정 대상 {len(flagged)}/{len(texts)}줄 ({detail})")
         print(f"🚀 Ollama 교정 시작 · 모델 {args.model} · 묶음 {args.batch_size}줄")
@@ -362,10 +381,21 @@ def polish_saved_draft(args: argparse.Namespace) -> None:
         cue.text = wrap_lines(text, 22)
     save_cues(args.output, cues)
 
+    if keep_draft:
+        print(f"💾 초안 체크포인트 유지 (교정 재개용): {draft_path}", flush=True)
+    else:
+        try:
+            os.remove(draft_path)
+            print(f"🗑 초안 체크포인트 삭제: {draft_path}", flush=True)
+        except OSError:
+            pass
+
     print()
     if failed:
         print(f"{ERROR_MARK} {failed}줄은 교정에 실패해 NLLB 초안을 유지합니다.")
     print(f"🎉 초안+교정 번역 완료! 저장 위치: {args.output}")
+    if used_ollama:
+        unload_model(args.model)
 
 
 if __name__ == "__main__":

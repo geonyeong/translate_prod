@@ -101,15 +101,16 @@ cd translate_prod
 ```
 
 1. **실행 모드**를 고릅니다: `자막 + 번역` / `자막만 생성` / `번역만`
-2. **입력 파일**을 창에 끌어다 놓거나 클릭해서 선택합니다.
+2. **입력 파일**을 창에 끌어다 놓거나 클릭해서 선택합니다. 여러 개를 넣으면 **대기열**로 같은 옵션을 순서대로 적용합니다.
    - 동영상(mp4, mkv, mov 등)을 넣으면 자막 추출 모드로, `.srt`를 넣으면 `번역만` 모드로 자동 전환됩니다.
    - 파일은 복사하지 않고 경로만 사용하므로 수 GB짜리 동영상도 바로 처리됩니다.
 3. **옵션**을 확인합니다.
    - 원본 언어 (음성 인식 언어 고정과 번역에 모두 사용), 음성 인식 모델 (기본: 1.7B 8bit), 자막 저장 폴더
    - 번역 엔진: NLLB와 NLLB+교정을 고르면 **NLLB 모델**(600M 빠름 / 1.3B 고품질), Ollama와 NLLB+교정을 고르면 **용어집** 파일, 구글을 고르면 API 키(선택) 항목이 나타납니다.
    - **자막 정리** (기본 켜짐): 반복·잡음 제거, 짧은 조각 병합
+   - 저장 폴더에 `{이름}.asr.json`이 있으면 **저장된 음성 인식 결과 재사용**으로 STT를 건너뛸 수 있습니다.
 4. **시작**을 누르면 `자막 추출 › 자막 정리 › 번역` 단계별 진행률과 남은 시간이 하단에 표시됩니다.
-5. 완료되면 결과 파일을 바로 열거나 Finder에서 확인할 수 있고, 자막 정리 결과(제거·병합된 자막 수)도 함께 표시됩니다. `자막만 생성` 후에는 **이 자막으로 번역하기** 버튼으로 이어서 번역할 수 있습니다.
+5. 완료되면 결과 파일을 바로 열거나 Finder에서 확인할 수 있고, **자막 미리보기**로 원문·한글을 나란히 볼 수 있습니다. `자막만 생성` 후에는 **이 자막으로 번역하기**로 이어서 번역할 수 있습니다.
 
 GUI의 편의 기능:
 
@@ -117,7 +118,8 @@ GUI의 편의 기능:
 - 언제든 **취소**할 수 있고, 같은 이름의 결과 파일이 있으면 덮어쓰기 전에 확인합니다.
 - 작업 중에는 Mac이 잠자기에 들어가지 않으며, 완료·실패 시 macOS 알림을 보냅니다.
 - 마지막으로 사용한 모드·엔진·언어·저장 폴더·NLLB 모델·용어집·자막 정리 설정을 기억합니다(구글 API 키는 보안상 저장하지 않음).
-- Ollama가 꺼져 있어도 시작을 누르면 앱을 먼저 실행합니다. NLLB+교정은 켜지지 않으면 교정만 건너뛰고, 결과 화면에 그 사실을 표시합니다.
+- Ollama가 꺼져 있어도 시작을 누르면 앱을 먼저 실행합니다. NLLB+교정은 켜지지 않으면 교정만 건너뛰고, 결과 화면에 그 사실을 표시합니다. 번역이 끝나면 Ollama 모델을 자동으로 내립니다.
+- NLLB+교정 중 취소해도 `{이름}_hybrid_draft.json` 초안이 남으면 **초안만 이어서 교정**으로 NLLB 없이 재개할 수 있습니다.
 
 ## 터미널로 사용하기
 
@@ -140,9 +142,10 @@ cd translate_prod
 
 | 번호 | 모드 | 입력 | 결과 |
 |------|------|------|------|
-| `[1]` | 자막과 번역 한 번에 | 동영상 | 원본 자막 + 한글 자막 |
-| `[2]` | 자막만 생성 | 동영상 | 원본 자막 |
+| `[1]` | 자막과 번역 한 번에 | 동영상 | 음성 인식 JSON + 원본 자막 + 한글 자막 |
+| `[2]` | 자막만 생성 | 동영상 | 음성 인식 JSON + 원본 자막 |
 | `[3]` | 자막으로 번역 자막만 생성 | 기존 `.srt` 자막 | 한글 자막 |
+| `[4]` | 저장된 JSON으로 자막 재정리 | `.asr.json` | 원본 자막 |
 
 ```bash
 ./run.sh 파일명.mp4               # 메뉴에서 [1] 또는 [2] 선택
@@ -174,14 +177,18 @@ cd translate_prod
 ```bash
 ./run.sh 파일명.mp4 --mode full --engine hybrid --lang ja     # NLLB 초안 + 어색한 줄만 교정
 ./run.sh 파일명.mp4 --mode full --engine ollama --lang ja     # 자막 + 문맥 번역
-./run.sh 파일명.mp4 --mode stt --lang ja                      # 자막만
+./run.sh 파일명.mp4 --mode stt --lang ja                      # 자막만 (+ .asr.json 보관)
+./run.sh result/파일명.asr.json --mode reclean --lang ja       # 저장된 JSON으로 자막만 다시 정리
 ./run.sh result/파일명.srt --mode translate --engine nllb -l ja # 번역 자막만
+./run.sh result/파일명.srt -m translate -e hybrid -l ja \
+  --resume-draft result/파일명_hybrid_draft.json              # 초안만 다시 교정
 ./run.sh 남의자막.srt -m translate -e google -l auto --no-clean  # 정리 없이 그대로 번역
 ```
 
 | 옵션 | 값 |
 |------|----|
-| `--mode`, `-m` | `full` (자막+번역) / `stt` (자막만) / `translate` (번역 자막만) |
+| `--mode`, `-m` | `full` / `stt` / `translate` / `reclean` |
+| `--resume-draft` | hybrid 초안 JSON 경로 (교정만 재실행) |
 | `--engine`, `-e` | `nllb` / `google` / `ollama` / `hybrid` |
 | `--lang`, `-l` | `ja` / `en` / `auto` (음성 인식 언어 고정 + 번역 원문 언어) |
 | `--no-clean` | 자막 정리(반복·잡음 제거, 조각 병합) 끄기 |
@@ -267,8 +274,9 @@ translate_prod/
 ├── import_srt.py           # NLLB 로컬 번역 (일괄 번역)
 ├── google_translate_srt.py # 구글 번역 (무료 웹 / 공식 API)
 ├── translate_srt.py        # Ollama(qwen3) 문맥 번역 + 용어집
-├── hybrid_translate_srt.py # NLLB 초안 + 어색한 줄만 Ollama 교정
-├── ollama_boot.py          # Ollama가 꺼져 있으면 실행, 실패 시 교정 단계는 건너뜀
+├── hybrid_translate_srt.py # NLLB 초안 + 어색한 줄만 Ollama 교정 (초안 체크포인트)
+├── ollama_boot.py          # Ollama 실행·모델 해제
+├── docs/improvements.md    # 로컬 개선안과 적용 상태
 ├── glossary.example.txt    # 용어집 예시 (glossary.txt로 복사해 사용, git 제외)
 ├── requirements.txt
 ├── docs/gui.png            # README용 GUI 화면
@@ -301,8 +309,9 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
 
 1. **GUI**  
    - [x] 실행 모드·파일·옵션 선택, 진행률 표시, 결과 열기를 제공하는 데스크톱 UI (`./gui.sh`)
-   - [ ] 자막 미리보기 및 편집
-   - [ ] 여러 파일 일괄 처리 (대기열)
+   - [x] 자막 미리보기 (원문·한글 나란히)
+   - [x] 여러 파일 일괄 처리 (대기열)
+   - [ ] 자막 편집 후 한 줄만 다시 번역
 
 2. **외부 번역 API 연동**  
    - [x] 구글 번역 (무료 웹 / 공식 Cloud Translation API)
@@ -316,8 +325,12 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
    - [x] NLLB 일괄 번역(FP16) + 1.3B 모델 선택, STT 8bit 모델 기본 적용
    - [x] NLLB 초안 후 어색한 줄만 Ollama 교정 (`hybrid`, 프로세스 분리·시간 제한)
    - [x] Ollama가 꺼져 있으면 자동 실행, 실패 시 NLLB+교정은 교정만 건너뜀
+   - [x] STT JSON(`.asr.json`) 보관 + `reclean` / GUI 재사용
+   - [x] Ollama 번역·교정 후 모델 자동 해제
+   - [x] hybrid 초안 체크포인트 + `--resume-draft` / GUI 재개
    - [ ] 화자 구분(`--diarize`)을 번역 문맥에 반영
-   - [ ] 번역 중단 시 이어서 번역 (체크포인트)
+   - [ ] NLLB 용어집·번역 캐시
+   - [ ] STT `--context` 용어 힌트
 
 ## 주의사항
 
@@ -327,3 +340,6 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
 - 모델 다운로드가 0%에서 멈추면 `HF_HUB_DISABLE_XET=1 ./run.sh ...`처럼 Hugging Face의 xet 전송을 끄고 다시 시도해 보세요.
 - Ollama 문맥 번역이 끝난 뒤 qwen3(약 5GB)는 1분 동안 메모리에 남아 있습니다. 16GB Mac에서는 이 상태로 음성 인식을 돌리면 3배 이상 느려지므로(측정: 2분 9초 → 7분 37초), 바로 다음 작업을 할 때는 1분 정도 기다리거나 `ollama stop qwen3:8b`로 내린 뒤 실행하세요.
 - NLLB+교정은 초안 프로세스가 끝난 뒤에 qwen3를 띄웁니다. 그래도 16GB에서 `1.3B` 초안 직후 교정은 빠듯하므로, 긴 파일은 `600M`을 쓰는 편이 안전합니다.
+- 음성 인식 결과는 `result/{이름}.asr.json`에 남습니다. STT 없이 자막만 다시 만들려면 `./run.sh … --mode reclean`을 쓰세요.
+- Ollama/hybrid가 끝나면 모델을 자동으로 내립니다. 수동으로 내리려면 `ollama stop qwen3:8b`입니다.
+- 로컬 개선안 전체 목록은 [`docs/improvements.md`](docs/improvements.md)를 참고하세요.

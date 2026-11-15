@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import ollama
 
-from ollama_boot import ensure_ollama
+from ollama_boot import ensure_ollama, unload_model
 from srt_cleanup import Cue, prepare_for_translation, save_cues, wrap_lines
 
 ROOT = Path(__file__).resolve().parent
@@ -318,6 +318,7 @@ def main() -> None:
     if failed:
         print(f"⚠️ 일부 줄은 번역에 실패해 원문이 유지되었습니다 ({failed}곳).")
     print(f"🎉 문맥 번역 완료! 저장 위치: {args.output}")
+    unload_model(args.model)
 
 
 if __name__ == "__main__":

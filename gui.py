@@ -28,11 +28,15 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -40,6 +44,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -58,6 +63,7 @@ MODES = [
     ("stt", "자막만 생성", "동영상 → 자막"),
     ("translate", "번역만", "기존 자막(.srt) → 한글 자막"),
 ]
+ASR_JSON_SUFFIX = ".asr.json"
 ENGINES = [
     ("nllb", "로컬 NLLB", "오프라인 · 빠름"),
     ("hybrid", "NLLB+교정", "초안 후 어색한 줄만"),
@@ -280,7 +286,82 @@ QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: trans
 #resultMeta { color: #7D8496; font-size: 11px; }
 #successTitle { color: #6FE0A8; font-weight: 700; font-size: 15px; }
 #warning { color: #FFC266; font-size: 12px; }
+QListWidget#queueList {
+    background: #10131A; border: 1px solid #232838; border-radius: 10px;
+    padding: 4px; min-height: 72px; max-height: 140px;
+}
+QListWidget#queueList::item { padding: 6px 8px; border-radius: 6px; }
+QListWidget#queueList::item:selected { background: rgba(124, 92, 255, 0.22); }
+#previewPane {
+    background: #0B0D12; border: 1px solid #1F2432; border-radius: 10px;
+    font-family: Menlo, monospace; font-size: 12px; color: #C9CFDB; padding: 8px;
+}
 """
+
+
+def fmt_cue_block(index: int, start: float, end: float, text: str) -> str:
+    def stamp(seconds: float) -> str:
+        total = max(0, int(seconds * 1000))
+        hours, rem = divmod(total, 3600_000)
+        minutes, rem = divmod(rem, 60_000)
+        secs, millis = divmod(rem, 1000)
+        return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+    return f"{index}\n{stamp(start)} --> {stamp(end)}\n{text}\n"
+
+
+class PreviewDialog(QDialog):
+    """Side-by-side read-only view of source and Korean cues."""
+
+    def __init__(self, src_path: Optional[Path], kor_path: Optional[Path], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("자막 미리보기")
+        self.resize(900, 560)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+        split = QSplitter()
+        self.src_view = QPlainTextEdit()
+        self.kor_view = QPlainTextEdit()
+        for view, title, path in (
+            (self.src_view, "원문", src_path),
+            (self.kor_view, "한글", kor_path),
+        ):
+            pane = QWidget()
+            pane_layout = QVBoxLayout(pane)
+            pane_layout.setContentsMargins(0, 0, 0, 0)
+            pane_layout.setSpacing(6)
+            label = QLabel(title if path is None else f"{title} · {path.name}")
+            label.setObjectName("fieldLabel")
+            view.setObjectName("previewPane")
+            view.setReadOnly(True)
+            view.setPlainText(self._load(path))
+            pane_layout.addWidget(label)
+            pane_layout.addWidget(view)
+            split.addWidget(pane)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        layout.addWidget(split)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        close_btn = buttons.button(QDialogButtonBox.Close)
+        if close_btn is not None:
+            close_btn.setText("닫기")
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _load(path: Optional[Path]) -> str:
+        if path is None or not path.is_file():
+            return "(파일 없음)"
+        try:
+            from srt_cleanup import load_cues
+
+            cues = load_cues(str(path))
+        except Exception as exc:  # noqa: BLE001 — show whatever failed to the user
+            return f"(불러오기 실패: {exc})"
+        if not cues:
+            return "(자막 없음)"
+        return "\n".join(fmt_cue_block(i, cue.start, cue.end, cue.text) for i, cue in enumerate(cues, 1))
 
 
 class Card(QFrame):
@@ -354,6 +435,7 @@ class Segmented(QWidget):
 
 class DropZone(QFrame):
     file_dropped = Signal(str)
+    files_dropped = Signal(list)
     browse_requested = Signal()
     cleared = Signal()
 
@@ -458,11 +540,14 @@ class DropZone(QFrame):
     def dropEvent(self, event):  # noqa: N802
         self.setProperty("dragging", False)
         repolish(self)
-        for url in event.mimeData().urls():
-            if url.isLocalFile():
-                event.acceptProposedAction()
-                self.file_dropped.emit(url.toLocalFile())
-                return
+        paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
+        if not paths:
+            return
+        event.acceptProposedAction()
+        if len(paths) == 1:
+            self.file_dropped.emit(paths[0])
+        else:
+            self.files_dropped.emit(paths)
 
 
 class LogView(QPlainTextEdit):
@@ -517,14 +602,18 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = QSettings("translate_prod", "SubtitleStudio")
         self.files: dict[str, Optional[Path]] = {"video": None, "srt": None}
+        self.queue: list[Path] = []
+        self.queue_index = -1
         self.proc: Optional[QProcess] = None
         self.steps: list[Step] = []
         self.step_index = -1
         self.running = False
         self.cancelled = False
         self.run_mode = "full"
+        self.run_resume_draft = False
         self.srt_path: Optional[Path] = None
         self.kor_path: Optional[Path] = None
+        self.asr_json_path: Optional[Path] = None
         self.stt_tmp_dir: Optional[Path] = None
         self.stt_json: Optional[Path] = None
         self.clean_summary = ""
@@ -590,8 +679,35 @@ class MainWindow(QMainWindow):
         self.drop = DropZone()
         self.drop.browse_requested.connect(self._browse_file)
         self.drop.file_dropped.connect(self._accept_file)
+        self.drop.files_dropped.connect(self._accept_files)
         self.drop.cleared.connect(self._clear_file)
         file_card.body.addWidget(self.drop)
+        self.queue_list = QListWidget()
+        self.queue_list.setObjectName("queueList")
+        self.queue_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.queue_list.hide()
+        queue_btns = QHBoxLayout()
+        queue_btns.setSpacing(8)
+        self.queue_add_btn = QPushButton("대기열에 추가")
+        self.queue_add_btn.setCursor(Qt.PointingHandCursor)
+        self.queue_add_btn.clicked.connect(self._browse_add_files)
+        self.queue_remove_btn = QPushButton("선택 제거")
+        self.queue_remove_btn.setObjectName("ghost")
+        self.queue_remove_btn.setCursor(Qt.PointingHandCursor)
+        self.queue_remove_btn.clicked.connect(self._remove_selected_queue)
+        self.queue_clear_btn = QPushButton("대기열 비우기")
+        self.queue_clear_btn.setObjectName("ghost")
+        self.queue_clear_btn.setCursor(Qt.PointingHandCursor)
+        self.queue_clear_btn.clicked.connect(self._clear_queue)
+        queue_btns.addWidget(self.queue_add_btn)
+        queue_btns.addWidget(self.queue_remove_btn)
+        queue_btns.addWidget(self.queue_clear_btn)
+        queue_btns.addStretch()
+        self.queue_hint = self._hint()
+        self.queue_hint.setText("파일을 여러 개 넣으면 같은 옵션으로 순서대로 처리합니다.")
+        file_card.body.addWidget(self.queue_list)
+        file_card.body.addLayout(queue_btns)
+        file_card.body.addWidget(self.queue_hint)
         col.addWidget(file_card)
 
         self.options_card = Card("옵션")
@@ -722,6 +838,34 @@ class MainWindow(QMainWindow):
         clean_layout.addWidget(self.clean_check)
         clean_layout.addWidget(clean_hint)
 
+        self.reuse_asr_check = QCheckBox("저장된 음성 인식 결과(.asr.json) 재사용")
+        self.reuse_asr_check.setChecked(False)
+        reuse_hint = self._hint()
+        reuse_hint.setText("저장 폴더에 같은 이름의 .asr.json이 있으면 음성 인식을 건너뛰고 정리·번역만 합니다.")
+        self.row_reuse = QWidget()
+        reuse_layout = QVBoxLayout(self.row_reuse)
+        reuse_layout.setContentsMargins(0, 0, 0, 0)
+        reuse_layout.setSpacing(4)
+        reuse_layout.addWidget(self.reuse_asr_check)
+        reuse_layout.addWidget(reuse_hint)
+        self.row_reuse.hide()
+
+        self.resume_draft_btn = QPushButton("초안만 이어서 교정")
+        self.resume_draft_btn.setObjectName("accentGhost")
+        self.resume_draft_btn.setCursor(Qt.PointingHandCursor)
+        self.resume_draft_btn.clicked.connect(self._resume_draft)
+        self.resume_draft_btn.hide()
+        self.resume_draft_hint = self._hint()
+        self.resume_draft_hint.setText("이전에 남은 NLLB 초안이 있습니다. 교정만 다시 실행합니다.")
+        self.resume_draft_hint.hide()
+        self.row_resume = QWidget()
+        resume_layout = QVBoxLayout(self.row_resume)
+        resume_layout.setContentsMargins(0, 0, 0, 0)
+        resume_layout.setSpacing(6)
+        resume_layout.addWidget(self.resume_draft_btn)
+        resume_layout.addWidget(self.resume_draft_hint)
+        self.row_resume.hide()
+
         top = QHBoxLayout()
         top.setSpacing(14)
         top.addWidget(self.row_lang, 1, Qt.AlignTop)
@@ -733,6 +877,8 @@ class MainWindow(QMainWindow):
         card.body.addWidget(self.row_nllb)
         card.body.addWidget(self.row_gloss)
         card.body.addWidget(self.row_clean)
+        card.body.addWidget(self.row_reuse)
+        card.body.addWidget(self.row_resume)
 
     def _build_bottom_bar(self) -> QWidget:
         bar = QFrame()
@@ -825,62 +971,170 @@ class MainWindow(QMainWindow):
         kind = self._file_kind()
         path = self.files[kind]
         if path is not None and path.is_file():
-            self.drop.set_file(path)
+            if len(self.queue) > 1:
+                self.drop.set_file(path)
+                self.drop.hint.setText(f"{short_path(path.parent)}  ·  대기열 {len(self.queue)}개")
+            else:
+                self.drop.set_file(path)
         elif kind == "srt":
-            self.drop.set_empty("자막 파일(.srt)을 끌어다 놓으세요", "또는 클릭해서 파일을 선택하세요")
+            self.drop.set_empty("자막 파일(.srt)을 끌어다 놓으세요", "여러 개를 넣으면 대기열로 순서 처리합니다")
         else:
             self.drop.set_empty(
                 "동영상 파일을 끌어다 놓으세요",
-                "mp4, mkv, mov 등 동영상·오디오 파일 · 클릭해서 선택할 수도 있습니다",
+                "mp4, mkv, mov 등 · 여러 개를 넣으면 대기열로 순서 처리합니다",
             )
+        self._refresh_queue_list()
+        self._refresh_reuse_asr()
+        self._refresh_resume_draft()
+
+    def _refresh_queue_list(self) -> None:
+        self.queue_list.clear()
+        for path in self.queue:
+            item = QListWidgetItem(path.name)
+            item.setToolTip(str(path))
+            item.setData(Qt.UserRole, str(path))
+            self.queue_list.addItem(item)
+        visible = len(self.queue) > 1
+        self.queue_list.setVisible(visible)
+        self.queue_remove_btn.setEnabled(bool(self.queue))
+        self.queue_clear_btn.setEnabled(bool(self.queue))
+
+    def _classify_path(self, path: Path) -> Optional[str]:
+        ext = path.suffix.lower()
+        if ext == ".srt":
+            return "srt"
+        if ext in MEDIA_EXTS:
+            return "video"
+        return None
 
     def _accept_file(self, raw_path: str) -> None:
-        path = Path(raw_path).expanduser().resolve()
-        if not path.is_file():
-            self.drop.show_error(f"파일을 찾을 수 없습니다: {path}")
+        self._accept_files([raw_path], replace=True)
+
+    def _accept_files(self, raw_paths: list[str], replace: bool = False) -> None:
+        paths: list[Path] = []
+        for raw in raw_paths:
+            path = Path(raw).expanduser().resolve()
+            if not path.is_file():
+                self.drop.show_error(f"파일을 찾을 수 없습니다: {path}")
+                return
+            kind = self._classify_path(path)
+            if kind is None:
+                self.drop.show_error(f"지원하지 않는 파일 형식입니다: {path.suffix or path.name}")
+                return
+            paths.append(path)
+        if not paths:
             return
-        ext = path.suffix.lower()
+
+        kinds = {self._classify_path(path) for path in paths}
+        if len(kinds) > 1:
+            self.drop.show_error("동영상과 자막을 한 대기열에 섞을 수 없습니다.")
+            return
+        kind = next(iter(kinds))
         mode = self.mode_seg.value()
         status = "준비되었습니다. 옵션을 확인하고 시작을 누르세요."
-        if ext == ".srt":
-            self.files["srt"] = path
-            if mode != "translate":
-                self.mode_seg.set_value("translate")
-                status = "자막 파일이 선택되어 '번역만' 모드로 전환했습니다."
-        elif ext in MEDIA_EXTS:
-            self.files["video"] = path
-            if mode == "translate":
-                self.mode_seg.set_value(getattr(self, "_last_video_mode", "full"))
-                status = "동영상 파일이 선택되어 자막 추출 모드로 전환했습니다."
+        if kind == "srt" and mode != "translate":
+            self.mode_seg.set_value("translate")
+            status = "자막 파일이 선택되어 '번역만' 모드로 전환했습니다."
+        elif kind == "video" and mode == "translate":
+            self.mode_seg.set_value(getattr(self, "_last_video_mode", "full"))
+            status = "동영상 파일이 선택되어 자막 추출 모드로 전환했습니다."
+
+        if replace:
+            self.queue = paths
         else:
-            self.drop.show_error(f"지원하지 않는 파일 형식입니다: {ext or path.name}")
-            return
-        self.settings.setValue("last_dir", str(path.parent))
+            seen = {p.resolve() for p in self.queue}
+            for path in paths:
+                if path.resolve() not in seen:
+                    self.queue.append(path)
+                    seen.add(path.resolve())
+        self.files[kind] = self.queue[0]
+        other = "video" if kind == "srt" else "srt"
+        self.files[other] = None
+        self.settings.setValue("last_dir", str(paths[0].parent))
         self._refresh_file_view()
         if not self.running:
+            if len(self.queue) > 1:
+                status = f"대기열 {len(self.queue)}개 · 같은 옵션으로 순서대로 처리합니다."
             self.status_label.setText(status)
 
     def _browse_file(self) -> None:
         if self.running:
             return
+        paths = self._pick_files(multi=False)
+        if paths:
+            self._accept_files(paths, replace=True)
+
+    def _browse_add_files(self) -> None:
+        if self.running:
+            return
+        paths = self._pick_files(multi=True)
+        if paths:
+            self._accept_files(paths, replace=not self.queue)
+
+    def _pick_files(self, multi: bool) -> list[str]:
         start_dir = self.settings.value("last_dir", str(ROOT))
         if self._file_kind() == "srt":
             caption, filters = "자막 파일 선택", "자막 파일 (*.srt);;모든 파일 (*)"
         else:
             patterns = " ".join(f"*{ext}" for ext in sorted(MEDIA_EXTS))
             caption, filters = "동영상 파일 선택", f"동영상·오디오 ({patterns});;모든 파일 (*)"
+        if multi:
+            paths, _ = QFileDialog.getOpenFileNames(self, caption, start_dir, filters)
+            return list(paths)
         path, _ = QFileDialog.getOpenFileName(self, caption, start_dir, filters)
-        if path:
-            self._accept_file(path)
+        return [path] if path else []
 
-    def _clear_file(self) -> None:
+    def _remove_selected_queue(self) -> None:
+        selected = {item.data(Qt.UserRole) for item in self.queue_list.selectedItems()}
+        if not selected:
+            return
+        self.queue = [path for path in self.queue if str(path) not in selected]
+        kind = self._file_kind()
+        self.files[kind] = self.queue[0] if self.queue else None
+        self._refresh_file_view()
+
+    def _clear_queue(self) -> None:
+        self.queue = []
         self.files[self._file_kind()] = None
         self._refresh_file_view()
+
+    def _clear_file(self) -> None:
+        self.queue = []
+        self.files[self._file_kind()] = None
+        self._refresh_file_view()
+
+    def _asr_json_for(self, source: Path) -> Path:
+        out_dir = Path(self.out_edit.text()).expanduser()
+        return out_dir / f"{source.stem}{ASR_JSON_SUFFIX}"
+
+    def _draft_for(self, srt_path: Path) -> Path:
+        return srt_path.with_name(f"{srt_path.stem}_hybrid_draft.json")
+
+    def _refresh_reuse_asr(self) -> None:
+        mode = self.mode_seg.value()
+        show = mode in ("full", "stt") and bool(self.queue)
+        available = False
+        if show:
+            available = any(self._asr_json_for(path).is_file() for path in self.queue)
+        self.row_reuse.setVisible(show and available)
+        if not (show and available):
+            self.reuse_asr_check.setChecked(False)
+
+    def _refresh_resume_draft(self) -> None:
+        mode = self.mode_seg.value()
+        engine = self.engine_seg.value()
+        show = False
+        if mode == "translate" and engine == "hybrid" and self.files["srt"]:
+            show = self._draft_for(self.files["srt"]).is_file()
+        self.row_resume.setVisible(show)
+        self.resume_draft_btn.setVisible(show)
+        self.resume_draft_hint.setVisible(show)
 
     def _choose_out_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "자막 저장 폴더 선택", self.out_edit.text())
         if path:
             self.out_edit.setText(path)
+            self._refresh_reuse_asr()
 
     def _choose_glossary(self) -> None:
         start = self.gloss_edit.text() or str(ROOT)
@@ -926,15 +1180,19 @@ class MainWindow(QMainWindow):
             self.lang_hint.setText("번역할 자막의 언어입니다.")
 
         self.run_btn.setText(RUN_LABELS[mode])
+        self._refresh_reuse_asr()
+        self._refresh_resume_draft()
         if not self.running:
-            titles = self._planned_titles(mode, engine)
+            titles = self._planned_titles(mode, engine, reuse_asr=False)
             self._set_chips(titles, ["pending"] * len(titles))
 
     @staticmethod
-    def _planned_titles(mode: str, engine: str) -> list[str]:
+    def _planned_titles(mode: str, engine: str, reuse_asr: bool = False) -> list[str]:
         titles = []
         if mode in ("full", "stt"):
-            titles += ["자막 추출", "자막 정리"]
+            if not reuse_asr:
+                titles.append("자막 추출")
+            titles.append("자막 정리")
         if mode in ("full", "translate"):
             titles.append(f"번역 · {ENGINE_LABELS[engine]}")
         return titles
@@ -957,35 +1215,69 @@ class MainWindow(QMainWindow):
         self.log_toggle.setText("접기" if visible else "펼치기")
 
     def _set_inputs_enabled(self, enabled: bool) -> None:
-        for widget in (self.mode_seg, self.drop, self.options_card):
+        for widget in (self.mode_seg, self.drop, self.options_card, self.queue_list,
+                       self.queue_add_btn, self.queue_remove_btn, self.queue_clear_btn):
             widget.setEnabled(enabled)
 
     # ---------- run ----------
+    def _resume_draft(self) -> None:
+        if self.running:
+            return
+        if self.mode_seg.value() != "translate":
+            self.mode_seg.set_value("translate")
+        self.engine_seg.set_value("hybrid")
+        self._pending_resume = True
+        self._start_run()
+
     def _start_run(self) -> None:
         if self.running:
             return
+        self.run_resume_draft = bool(getattr(self, "_pending_resume", False))
+        self._pending_resume = False
         mode = self.mode_seg.value()
         engine = self.engine_seg.value()
         kind = self._file_kind(mode)
-        source = self.files[kind]
-        if source is None or not source.is_file():
+        if not self.queue:
+            source = self.files[kind]
+            if source is not None and source.is_file():
+                self.queue = [source]
+        if not self.queue:
             self.drop.show_error("먼저 파일을 선택하세요.")
+            self.run_resume_draft = False
             return
-        needs_stt = mode in ("full", "stt")
-        needs_tr = mode in ("full", "translate")
 
-        if needs_stt:
-            out_dir = Path(self.out_edit.text()).expanduser()
-            out_dir.mkdir(parents=True, exist_ok=True)
-            srt_path = out_dir / f"{source.stem}.srt"
-        else:
-            srt_path = source
-        kor_path = srt_path.with_name(f"{srt_path.stem}_KOR.srt") if needs_tr else None
+        self.run_mode = mode
+        self.run_engine = engine
+        self.run_lang = self.lang_combo.currentData()
+        self.run_model = self.model_combo.currentData()
+        self.run_clean = self.clean_check.isChecked()
+        self.run_nllb = self.nllb_combo.currentData()
+        self.run_glossary = self.gloss_edit.text().strip()
+        self.run_reuse_asr = bool(self.reuse_asr_check.isChecked() and mode in ("full", "stt"))
+        if self.run_resume_draft and (mode != "translate" or engine != "hybrid"):
+            self.run_resume_draft = False
+        if self.run_resume_draft:
+            draft = self._draft_for(self.queue[0])
+            if not draft.is_file():
+                self.drop.show_error(f"초안 파일이 없습니다: {draft.name}")
+                self.run_resume_draft = False
+                return
 
-        targets = ([srt_path] if needs_stt else []) + ([kor_path] if kor_path else [])
+        targets: list[Path] = []
+        for source in self.queue:
+            if mode in ("full", "stt"):
+                out_dir = Path(self.out_edit.text()).expanduser()
+                srt_path = out_dir / f"{source.stem}.srt"
+            else:
+                srt_path = source
+            targets.append(srt_path)
+            if mode in ("full", "translate"):
+                targets.append(srt_path.with_name(f"{srt_path.stem}_KOR.srt"))
         existing = [p for p in targets if p.exists()]
-        if existing:
-            names = "\n".join(f"• {p.name}" for p in existing)
+        if existing and not self.run_resume_draft:
+            names = "\n".join(f"• {p.name}" for p in existing[:12])
+            if len(existing) > 12:
+                names += f"\n… 외 {len(existing) - 12}개"
             answer = QMessageBox.question(
                 self,
                 "기존 파일 덮어쓰기",
@@ -994,41 +1286,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.No,
             )
             if answer != QMessageBox.Yes:
+                self.run_resume_draft = False
                 return
-
-        self.run_mode = mode
-        self.run_source = source
-        self.run_engine = engine
-        self.run_lang = self.lang_combo.currentData()
-        self.run_model = self.model_combo.currentData()
-        self.run_clean = self.clean_check.isChecked()
-        self.run_nllb = self.nllb_combo.currentData()
-        self.run_glossary = self.gloss_edit.text().strip()
-        self.srt_path = srt_path
-        self.kor_path = kor_path
-        self.batch_errors = 0
-        self.clean_summary = ""
-        self.ollama_skipped = ""
-        self._remove_stt_tmp()
-        self.stt_tmp_dir = Path(tempfile.mkdtemp(prefix="subtitle_stt_")) if needs_stt else None
-        self.stt_json = None
-
-        self.steps = []
-        if needs_stt:
-            self.steps.append(Step("stt", "자막 추출", "자막 추출 중", self._stt_args, parse_stt, self._finish_stt))
-            self.steps.append(
-                Step("clean", "자막 정리", "자막 정리 중", self._clean_args, parse_none, self._finish_clean)
-            )
-        if needs_tr:
-            label = ENGINE_LABELS[engine]
-            self.steps.append(
-                Step("translate", f"번역 · {label}", f"번역 중 ({label})", self._translate_args, parse_count,
-                     self._finish_translate)
-            )
 
         self._save_settings()
         self.running = True
         self.cancelled = False
+        self.queue_index = -1
         self.result_card.hide()
         self.log.clear()
         self._set_inputs_enabled(False)
@@ -1038,6 +1302,64 @@ class MainWindow(QMainWindow):
         self.run_started_wall = time.time()
         self.timer.start()
         self._tick()
+        self._start_next_queue_item()
+
+    def _start_next_queue_item(self) -> None:
+        self.queue_index += 1
+        if self.queue_index >= len(self.queue):
+            self._end_run("success")
+            return
+        source = self.queue[self.queue_index]
+        mode = self.run_mode
+        engine = self.run_engine
+        needs_stt = mode in ("full", "stt")
+        needs_tr = mode in ("full", "translate")
+        reuse_asr = self.run_reuse_asr and needs_stt
+
+        if needs_stt:
+            out_dir = Path(self.out_edit.text()).expanduser()
+            out_dir.mkdir(parents=True, exist_ok=True)
+            srt_path = out_dir / f"{source.stem}.srt"
+            self.asr_json_path = out_dir / f"{source.stem}{ASR_JSON_SUFFIX}"
+        else:
+            srt_path = source
+            self.asr_json_path = None
+        kor_path = srt_path.with_name(f"{srt_path.stem}_KOR.srt") if needs_tr else None
+
+        if reuse_asr and (self.asr_json_path is None or not self.asr_json_path.is_file()):
+            self.log.append_line(f"⚠ {source.name}: 저장된 .asr.json이 없어 음성 인식을 다시 실행합니다.")
+            reuse_asr = False
+
+        self.run_source = source
+        self.files[self._file_kind(mode)] = source
+        self.srt_path = srt_path
+        self.kor_path = kor_path
+        self.batch_errors = 0
+        self.clean_summary = ""
+        self.ollama_skipped = ""
+        self._remove_stt_tmp()
+        self.stt_tmp_dir = Path(tempfile.mkdtemp(prefix="subtitle_stt_")) if (needs_stt and not reuse_asr) else None
+        self.stt_json = self.asr_json_path if reuse_asr else None
+
+        self.steps = []
+        if needs_stt and not reuse_asr:
+            self.steps.append(Step("stt", "자막 추출", "자막 추출 중", self._stt_args, parse_stt, self._finish_stt))
+        if needs_stt:
+            self.steps.append(
+                Step("clean", "자막 정리", "자막 정리 중", self._clean_args, parse_none, self._finish_clean)
+            )
+        if needs_tr:
+            label = ENGINE_LABELS[engine]
+            title = f"번역 · {label}"
+            if self.run_resume_draft:
+                title = "교정 · NLLB 초안"
+            self.steps.append(
+                Step("translate", title, f"번역 중 ({label})", self._translate_args, parse_count,
+                     self._finish_translate)
+            )
+
+        prefix = f"[{self.queue_index + 1}/{len(self.queue)}] " if len(self.queue) > 1 else ""
+        self.log.append_line(f"■ {prefix}{source.name}")
         self._run_step(0)
 
     def _stt_args(self) -> list[str]:
@@ -1083,6 +1405,9 @@ class MainWindow(QMainWindow):
             args += ["--model", self.run_nllb]
         if self.run_engine == "hybrid":
             args += ["--nllb-model", self.run_nllb]
+            if self.run_resume_draft:
+                draft = self._draft_for(self.srt_path)
+                args += ["--resume-draft", str(draft)]
         if self.run_engine in ("ollama", "hybrid") and self.run_glossary:
             args += ["--glossary", self.run_glossary]
         if not self.run_clean:
@@ -1094,10 +1419,17 @@ class MainWindow(QMainWindow):
 
     def _finish_stt(self) -> Optional[str]:
         candidates = sorted(self.stt_tmp_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if candidates:
-            self.stt_json = candidates[0]
-            return None
-        return "음성 인식 결과가 생성되지 않았습니다. 로그를 확인하세요."
+        if not candidates:
+            return "음성 인식 결과가 생성되지 않았습니다. 로그를 확인하세요."
+        source_json = candidates[0]
+        if self.asr_json_path is not None:
+            self.asr_json_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source_json, self.asr_json_path)
+            self.stt_json = self.asr_json_path
+            self.log.append_line(f"음성 인식 JSON 저장: {self.asr_json_path}")
+        else:
+            self.stt_json = source_json
+        return None
 
     def _finish_clean(self) -> Optional[str]:
         if self._is_fresh(self.srt_path):
@@ -1220,6 +1552,9 @@ class MainWindow(QMainWindow):
         self.log.append_line(f"✓ {step.title} 완료")
         if self.step_index + 1 < len(self.steps):
             self._run_step(self.step_index + 1)
+        elif self.queue_index + 1 < len(self.queue):
+            self.run_resume_draft = False
+            self._start_next_queue_item()
         else:
             self._end_run("success")
 
@@ -1240,11 +1575,14 @@ class MainWindow(QMainWindow):
         self.running = False
         self.timer.stop()
         self._remove_stt_tmp()
+        self.run_resume_draft = False
         elapsed = fmt_duration(time.monotonic() - self.run_started)
         self._set_inputs_enabled(True)
         self.cancel_btn.hide()
         self.cancel_btn.setEnabled(True)
         self.run_btn.show()
+        self._refresh_reuse_asr()
+        self._refresh_resume_draft()
 
         titles = [s.title for s in self.steps]
         idx = max(self.step_index, 0)
@@ -1252,7 +1590,8 @@ class MainWindow(QMainWindow):
             self._set_chips(titles, ["done"] * len(titles))
             self.progress.setRange(0, 1000)
             self.progress.setValue(1000)
-            self.status_label.setText(f"완료 · 총 소요 시간 {elapsed}")
+            queue_note = f" · 파일 {len(self.queue)}개" if len(self.queue) > 1 else ""
+            self.status_label.setText(f"완료{queue_note} · 총 소요 시간 {elapsed}")
             self.log.append_line(f"■ 모든 작업 완료 ({elapsed})")
             self._show_result()
             notify("Subtitle Studio", f"작업이 완료되었습니다 ({elapsed})")
@@ -1266,6 +1605,10 @@ class MainWindow(QMainWindow):
             if state == "cancelled":
                 self.status_label.setText("작업을 취소했습니다.")
                 self.log.append_line("■ 사용자가 작업을 취소했습니다.")
+                if self.srt_path and self.run_engine == "hybrid":
+                    draft = self._draft_for(self.srt_path)
+                    if draft.is_file():
+                        self.log.append_line(f"초안이 남아 있습니다: {draft}")
             else:
                 self.status_label.setText(message or "작업이 실패했습니다.")
                 self.log.append_line(f"■ 오류: {message}")
@@ -1284,6 +1627,8 @@ class MainWindow(QMainWindow):
         title.setObjectName("successTitle")
         self.result_body.addWidget(title)
 
+        if self.run_mode in ("full", "stt") and self.asr_json_path and self.asr_json_path.is_file():
+            self.result_body.addWidget(self._result_row("음성 인식 JSON", self.asr_json_path))
         if self.run_mode in ("full", "stt") and self.srt_path:
             self.result_body.addWidget(self._result_row("원본 자막", self.srt_path))
         if self.kor_path:
@@ -1307,18 +1652,28 @@ class MainWindow(QMainWindow):
             warning.setWordWrap(True)
             self.result_body.addWidget(warning)
 
+        actions = QHBoxLayout()
+        actions.addStretch()
+        if self.srt_path or self.kor_path:
+            preview_btn = QPushButton("자막 미리보기")
+            preview_btn.setCursor(Qt.PointingHandCursor)
+            preview_btn.clicked.connect(self._open_preview)
+            actions.addWidget(preview_btn)
         if self.run_mode == "stt" and self.srt_path:
             next_btn = QPushButton("이 자막으로 번역하기  →")
             next_btn.setObjectName("accentGhost")
             next_btn.setCursor(Qt.PointingHandCursor)
             next_btn.clicked.connect(self._translate_generated_srt)
-            row = QHBoxLayout()
-            row.addStretch()
-            row.addWidget(next_btn)
-            self.result_body.addLayout(row)
+            actions.addWidget(next_btn)
+        if actions.count() > 1:
+            self.result_body.addLayout(actions)
 
         self.result_card.show()
         QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(self.result_card))
+
+    def _open_preview(self) -> None:
+        dialog = PreviewDialog(self.srt_path, self.kor_path, self)
+        dialog.exec()
 
     def _result_row(self, label: str, path: Path) -> QWidget:
         row = QFrame()
