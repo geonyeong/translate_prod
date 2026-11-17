@@ -78,7 +78,7 @@ Ollama 문맥 번역의 안정성 장치:
 - 타임코드는 LLM에 보내지 않고 코드가 보관하므로 시간·번호가 깨지지 않습니다.
 - 응답 형식을 JSON 스키마로 강제하고, 빠지거나 일본어가 남은 줄은 한 줄씩 다시 요청합니다.
 - qwen3가 가끔 남기는 일본어 어미(`만나ましょう` 등)는 마지막에 자동 보정합니다.
-- **용어집**: `glossary.example.txt`를 `glossary.txt`로 복사해 `원문 = 번역`을 적어 두면 인물 이름·고유명사를 항상 같은 번역으로 고정합니다(`--glossary 파일` 또는 GUI에서 지정 가능).
+- **용어집**: `glossary.example.txt`를 `glossary.txt`로 복사해 `원문 = 번역`을 적어 두거나, GUI **용어집 만들기**로 여러 `원문.srt`+`원문_KOR.srt`에서 공통 용어를 골라 저장합니다.
 
 ### 속도 측정 (Mac mini M2 16GB)
 
@@ -120,6 +120,7 @@ GUI의 편의 기능:
 - 마지막으로 사용한 모드·엔진·언어·저장 폴더·NLLB 모델·용어집·자막 정리 설정을 기억합니다(구글 API 키는 보안상 저장하지 않음).
 - Ollama가 꺼져 있어도 시작을 누르면 앱을 먼저 실행합니다. NLLB+교정은 켜지지 않으면 교정만 건너뛰고, 결과 화면에 그 사실을 표시합니다. 번역이 끝나면 Ollama 모델을 자동으로 내립니다.
 - NLLB+교정 중 취소해도 `{이름}_hybrid_draft.json` 초안이 남으면 **초안만 이어서 교정**으로 NLLB 없이 재개할 수 있습니다.
+- 상단 **용어집 만들기**에서 여러 번역본을 모아 인물명·고유명사 번역을 통일할 수 있습니다.
 
 ## 터미널로 사용하기
 
@@ -275,6 +276,8 @@ translate_prod/
 ├── google_translate_srt.py # 구글 번역 (무료 웹 / 공식 API)
 ├── translate_srt.py        # Ollama(qwen3) 문맥 번역 + 용어집
 ├── hybrid_translate_srt.py # NLLB 초안 + 어색한 줄만 Ollama 교정 (초안 체크포인트)
+├── glossary_builder.py     # 여러 원문·한글 자막에서 용어 후보 추출
+├── glossary_gui.py         # 용어집 만들기 창
 ├── ollama_boot.py          # Ollama 실행·모델 해제
 ├── docs/improvements.md    # 로컬 개선안과 적용 상태
 ├── glossary.example.txt    # 용어집 예시 (glossary.txt로 복사해 사용, git 제외)
@@ -331,6 +334,7 @@ NLLB_MODEL=1.3b ./run.sh video.mp4 -m full -e nllb -l ja  # 고품질 NLLB
    - [ ] 화자 구분(`--diarize`)을 번역 문맥에 반영
    - [ ] NLLB 용어집·번역 캐시
    - [ ] STT `--context` 용어 힌트
+   - [x] 여러 원문·번역 자막을 모아 용어집 만들기 (GUI · `glossary_builder.py`)
 
 ## 주의사항
 

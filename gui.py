@@ -665,6 +665,11 @@ class MainWindow(QMainWindow):
         titles.addWidget(subtitle)
         header.addLayout(titles)
         header.addStretch()
+        glossary_btn = QPushButton("용어집 만들기")
+        glossary_btn.setCursor(Qt.PointingHandCursor)
+        glossary_btn.setToolTip("여러 원문·한글 자막에서 공통 용어를 골라 glossary.txt로 저장합니다.")
+        glossary_btn.clicked.connect(self._open_glossary_builder)
+        header.addWidget(glossary_btn, 0, Qt.AlignTop)
         badge = QLabel("Apple Silicon · 로컬 처리")
         badge.setObjectName("badge")
         header.addWidget(badge, 0, Qt.AlignTop)
@@ -1659,6 +1664,11 @@ class MainWindow(QMainWindow):
             preview_btn.setCursor(Qt.PointingHandCursor)
             preview_btn.clicked.connect(self._open_preview)
             actions.addWidget(preview_btn)
+        if self.kor_path and self.kor_path.is_file():
+            gloss_btn = QPushButton("용어집 만들기")
+            gloss_btn.setCursor(Qt.PointingHandCursor)
+            gloss_btn.clicked.connect(self._open_glossary_builder)
+            actions.addWidget(gloss_btn)
         if self.run_mode == "stt" and self.srt_path:
             next_btn = QPushButton("이 자막으로 번역하기  →")
             next_btn.setObjectName("accentGhost")
@@ -1674,6 +1684,30 @@ class MainWindow(QMainWindow):
     def _open_preview(self) -> None:
         dialog = PreviewDialog(self.srt_path, self.kor_path, self)
         dialog.exec()
+
+    def _open_glossary_builder(self) -> None:
+        from glossary_gui import GlossaryBuilderDialog
+
+        out_dir = Path(self.out_edit.text()).expanduser()
+        gloss = self.gloss_edit.text().strip()
+        dialog = GlossaryBuilderDialog(
+            self,
+            start_dir=out_dir if out_dir.is_dir() else DEFAULT_OUTPUT_DIR,
+            glossary_path=Path(gloss) if gloss else None,
+        )
+        # Seed with the just-finished pair or everything already in the output folder.
+        seeds: list[Path] = []
+        if self.srt_path and self.kor_path and self.srt_path.is_file() and self.kor_path.is_file():
+            seeds.append(self.srt_path)
+        elif out_dir.is_dir():
+            seeds.append(out_dir)
+        if seeds:
+            dialog._load_paths(seeds)
+        dialog.exec()
+        # If the dialog saved a glossary, point the main option at it.
+        saved = Path(dialog.gloss_edit.text().strip())
+        if saved.is_file() and not self.gloss_edit.text().strip():
+            self.gloss_edit.setText(str(saved))
 
     def _result_row(self, label: str, path: Path) -> QWidget:
         row = QFrame()
